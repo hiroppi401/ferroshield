@@ -8,14 +8,17 @@ Dokumen ini berisi prosedur teknis: arsitektur basis aturan, cara memperbarui & 
 
 | Berkas | Fungsi | Tanda tangan | Lokasi |
 |---|---|---|---|
-| `rules.json` | Rule hash (MD5/SHA-256/TLSH), pola regex, `extension_ids`, blacklist IP/domain | **Ya** — Ed25519 (`rules.json.sig`, diverifikasi `config.rs`) | direktori kerja (biasanya `/etc/ferroshield/`) |
-| `rules.yar` | Ruleset YARA-X (12.460 rule) | **Tidak** — teks polos | direktori kerja (`src/scanner.rs:42`) |
-| `config.json` | `default_action`, `downloads_dir` (runtime, tidak ditandatangani) | Tidak | `$FERROSHIELD_CONFIG`, `./config.json`, atau `/etc/ferroshield/config.json` |
+| `rules.json` | Rule hash (MD5/SHA-256/TLSH), pola regex, `extension_ids`, blacklist IP/domain, **`ebpf_sha256`**, **`rules_yar_sha256`** | **Ya** — Ed25519 (`rules.json.sig`, diverifikasi `config.rs`) | direktori kerja (biasanya `/etc/ferroshield/`) |
+| `rules.yar` | Ruleset YARA-X (12.419 rule) | **Hash SHA-256** dicatat di `rules.json` yang ditandatangani (`rules_yar_sha256`, diverifikasi `src/scanner.rs`) | direktori kerja (`src/scanner.rs:42`) |
+| `config.json` | `default_action`, `downloads_dir`, `miner_detection_require_secondary_signal`, `process_containment` (runtime, tidak ditandatangani) | Tidak | `$FERROSHIELD_CONFIG`, `./config.json`, atau `/etc/ferroshield/config.json` |
 | `whitelist.json` | Daftar path file yang dikecualikan | Tidak | direktori kerja |
+| `dashboard.token` | Token akses Web UI (mode `0600`) untuk semua endpoint `/api/*` | Tidak (dibuat saat startup) | direktori kerja (`/etc/ferroshield/dashboard.token`) |
 
 ### Cara kerja pemuatan `rules.yar`
 - Dibaca **sekali** saat `Scanner::new()` dijalankan (`src/scanner.rs:42`), dari `Path::new("rules.yar")` **relatif terhadap direktori kerja** biner.
+- Sebelum dikompilasi, SHA-256 `rules.yar` diverifikasi terhadap `rules_yar_sha256` di `rules.json` yang sudah diverifikasi Ed25519. Bila tidak cocok → log `[-] PERINGATAN: SHA-256 rules.yar tidak cocok...` dan **YARA dinonaktifkan** (jangan diam-diam terima ruleset yang diubah). Ruleset lama tanpa field `rules_yar_sha256` tetap dimuat (kompatibilitas mundur).
 - Bila file tidak ada → dilewati diam-diam (YARA nonaktif). Bila gagal dikompilasi → log `[-] Gagal kompilasi rules.yar` (YARA nonaktif).
+- Scan YARA dibatasi waktu **1 detik per file** (`YARA_SCAN_TIMEOUT` di `src/scanner.rs`) agar regex patologis (ReDoS) tidak menghentikan Browser Guard/daemon.
 - YARA hanya diterapkan pada file **< 10 MB** (`src/scanner.rs:194`).
 - `rules.yar`/`rules.json` otomatis dilewati pada pemindaian direktori (`src/scanner.rs:349`) agar ruleset tidak men-flag dirinya sendiri.
 
@@ -25,7 +28,8 @@ Dokumen ini berisi prosedur teknis: arsitektur basis aturan, cara memperbarui & 
 
 - **Sumber**: [Yara-Rules/rules](https://github.com/Yara-Rules/rules) — commit `0f93570194a80d2f2032869055808b0ddcdfb360` (12 Apr 2022)
 - **Lisensi**: **GPL-2.0** (catatan lisensi lihat §6)
-- **Jumlah**: 12.460 rule, ~5,5 MB
+- **Jumlah**: 12.419 rule, ~5,5 MB
+- **SHA-256**: `8a172c4f13d1ed84b974f0e3228070ab64bfdf542120b7eee155fc91b7709c8a` (per 14 Agu 2026, setelah patch ReDoS)
 - **Kategori yang disertakan**: `malware`, `webshells`, `packers`, `exploit_kits`, `maldocs`, `email`, `cve_rules`
 - **Kategori yang TIDAK disertakan**: `crypto`, `capabilities`, `antidebug_antivm`, `deprecated`, `mobile_malware` (bergantung modul `androguard`), berkas `*.eml` (sampel email asli), dan folder `Operation_Blockbuster/*.yara`/`mastersig`
 - **File yang dibuang karena tidak kompatibel `yara-x 0.5`**:
@@ -60,6 +64,11 @@ done
 # 3. Validasi kompilasi (lihat §4) — WAJIB lolos sebelum dipakai
 # 4. Ganti berkas di proyek
 cp /tmp/rules.yar ./rules.yar
+
+# 5. Perbarui hash & tanda tangan (WAJIB, agar verifikasi integritas tidak menolak)
+#    Mencatat SHA-256 baru rules.yar (dan modul eBPF bila ada) ke rules.json,
+#    lalu menandatangani ulang dengan rules.key.
+ferroshield sign-rules
 ```
 
 **Penting saat menambah kategori/file baru**: pastikan:
@@ -125,7 +134,9 @@ sudo ./control.sh logs                     # via script helper
 
 ## 6. Catatan Keamanan & Lisensi
 
-- `rules.yar` **tidak ditandatangani** (beda dengan `rules.json`). Siapa pun yang dapat menulis `/etc/ferroshield/rules.yar` dapat mengubah perilaku deteksi. Pastikan direktori dikunci (`chmod 0700 /etc/ferroshield`) dan pertimbangkan integrasi verifikasi tanda tangan untuk `rules.yar` bila kebutuhan hardening lebih ketat.
+- Integritas `rules.yar` dilindungi oleh **hash SHA-256** yang dicatat di `rules.json` (yang ditandatangani Ed25519). `ferroshield sign-rules` menghitung ulang hash tersebut; bila `rules.yar` diubah tanpa `sign-rules`, YARA dinonaktifkan dengan peringatan jelas. Modul eBPF `/usr/lib/ferroshield/ferroshield_ebpf.o` dilindungi serupa via `ebpf_sha256`; modul yang diubah akan ditolak dan daemon fallback ke procfs.
+- Semua endpoint Web UI `/api/*` mewajibkan token dari `dashboard.token` (mode `0600`), sehingga proses lokal non-browser tidak dapat memicu aksi destruktif terhadap daemon root.
+- **Mitigasi proses berbahaya = freeze-first (anti-mutasi)** (`src/contain.rs`). Saat proses terdeteksi (IP blacklist, path temp mencurigakan, port mining, heuristik CPU, atau event eBPF), urutannya: **(1) bekukan seluruh pohon proses** via *cgroup v2 freezer* (`cgroup.freeze`, atomik & mencegah fork; fallback `SIGSTOP` ke seluruh keturunan lewat walk `/proc`), **(2) netralkan binary** (karantina AES-256/delet), **(3) blokir IP** (jika relevan), lalu **(4) SIGKILL** proses yang masih beku dan bersihkan cgroup. Proses yang beku tidak dapat mengeksekusi kode apa pun, sehingga tidak ada jendela untuk mutasi/respawn saat binary dibersihkan. Mode diatur lewat `process_containment` (`auto`/`cgroup`/`sigstop`/`off`); proses ber-pid ≤ 1, daemon sendiri, dan biner yang mengandung "ferroshield" selalu dikecualikan.
 - Ruleset ini berasal dari proyek **GPL-2.0**; FerroShield berlisensi **Proprietary** (LICENSE). Menggabungkan rule GPL ke produk proprietary berpotensi bermasalah secara lisensi — evaluasi legal sebelum distribusi publik.
 - Beberapa rule memuat potongan skrip berbahaya (PowerShell, JS, PHP webshell, hexdump exploit) **sebagai pola deteksi semata**; FerroShield tidak pernah mengeksekusinya — hanya mencocokkan pola.
 
@@ -134,7 +145,8 @@ sudo ./control.sh logs                     # via script helper
 ## 7. Checklist Pasca-Update
 
 - [ ] `rules.yar` baru lolos kompilasi (scan EICAR menampilkan `YARA-eicar`)
-- [ ] `sha256sum rules.yar` dicatat untuk audit
+- [ ] `ferroshield sign-rules` dijalankan (hash baru `rules.yar` + `ebpf_sha256` dicatat di `rules.json`, lalu ditandatangani ulang)
+- [ ] `sha256sum rules.yar` dicatat untuk audit (sinkron dengan §2)
 - [ ] Salinan terpasang di `/etc/ferroshield/rules.yar` dan service di-restart
 - [ ] `scan <folder berisi file bersih>` tidak menampilkan `rules.yar` sebagai ancaman
 - [ ] Tidak ada error `Gagal kompilasi rules.yar` di `journalctl`

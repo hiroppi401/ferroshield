@@ -1,5 +1,7 @@
+use crate::contain::ContainStrategy;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,13 @@ pub const RULES_PUBLIC_KEY: &str =
 pub struct RuntimeConfig {
     pub default_action: Option<String>, // "quarantine" or "delete"
     pub downloads_dir: Option<String>,
+    /// When true (default), a mining-port connection is only alerted on unless
+    /// an additional signal (blacklisted IP or suspicious temp path) is present.
+    pub miner_detection_require_secondary_signal: Option<bool>,
+    /// How detected malicious processes are contained before being killed:
+    /// "auto" (cgroup v2 freezer, SIGSTOP fallback), "cgroup", "sigstop", or
+    /// "off" (legacy immediate-kill, no freezing).
+    pub process_containment: Option<String>,
 }
 
 /// Locates and loads the runtime config, preferring in order:
@@ -64,6 +73,16 @@ pub fn effective_downloads_dir(runtime: &RuntimeConfig, rules: &RulesConfig) -> 
     }
 }
 
+/// Resolves the process-containment strategy from the runtime config
+/// (defaults to `Auto`: cgroup v2 freezer with SIGSTOP fallback).
+pub fn effective_contain_strategy(runtime: &RuntimeConfig) -> ContainStrategy {
+    runtime
+        .process_containment
+        .as_deref()
+        .map(ContainStrategy::from_str)
+        .unwrap_or(ContainStrategy::Auto)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Hashes {
     pub sha256: Option<String>,
@@ -89,8 +108,11 @@ pub struct Rule {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_action: Option<String>, // "quarantine" or "delete"
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub web_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub downloads_dir: Option<String>,
 }
 
@@ -105,6 +127,14 @@ pub struct RulesConfig {
     pub settings: Option<Settings>,
     pub rules: Vec<Rule>,
     pub network_blacklist: NetworkBlacklist,
+    /// Expected SHA-256 of the eBPF object file, recorded in the signed
+    /// rules.json so the loader refuses tampered modules. Absent on legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ebpf_sha256: Option<String>,
+    /// Expected SHA-256 of rules.yar, recorded in the signed rules.json so the
+    /// YARA ruleset cannot be silently replaced. Absent on legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_yar_sha256: Option<String>,
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -234,6 +264,61 @@ pub fn sign_rules<P: AsRef<Path>>(
     Ok(())
 }
 
+fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let mut hasher = Sha256::new();
+    let mut file = File::open(path)?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Records the SHA-256 of the eBPF object file into the `ebpf_sha256` field of
+/// rules.json so the loader can refuse tampered kernel modules. The first
+/// existing candidate path is used; when none exists the field is cleared. The
+/// resulting rules.json still needs to be signed afterwards (`sign_rules`).
+pub fn update_ebpf_sha256_in_rules<P: AsRef<Path>>(
+    rules_path: P,
+    ebpf_candidates: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules_path = rules_path.as_ref();
+    let mut config: RulesConfig = serde_json::from_str(&std::fs::read_to_string(rules_path)?)?;
+    config.ebpf_sha256 = None;
+    for candidate in ebpf_candidates {
+        if candidate.exists() {
+            config.ebpf_sha256 = Some(sha256_file(candidate)?);
+            break;
+        }
+    }
+    std::fs::write(rules_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+/// Records the SHA-256 of rules.yar into the `rules_yar_sha256` field of
+/// rules.json so the YARA ruleset cannot be replaced undetected. The first
+/// existing candidate path is used; when none exists the field is cleared.
+pub fn update_rules_yar_sha256_in_rules<P: AsRef<Path>>(
+    rules_path: P,
+    rules_yar_candidates: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules_path = rules_path.as_ref();
+    let mut config: RulesConfig = serde_json::from_str(&std::fs::read_to_string(rules_path)?)?;
+    config.rules_yar_sha256 = None;
+    for candidate in rules_yar_candidates {
+        if candidate.exists() {
+            config.rules_yar_sha256 = Some(sha256_file(candidate)?);
+            break;
+        }
+    }
+    std::fs::write(rules_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
 pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig, Box<dyn std::error::Error>> {
     let path_ref = path.as_ref();
     verify_rules_signature(path_ref)?;
@@ -304,6 +389,60 @@ mod tests {
         // A tampered rules file must fail verification.
         fs::write(&rules_path, "{\"tampered\": true}").unwrap();
         assert!(verify_rules_signature(&rules_path).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_ebpf_sha256_in_rules_records_and_clears() {
+        let dir = temp_dir("ebpfhash");
+        let rules_path = dir.join("rules.json");
+        fs::write(&rules_path, SAMPLE_RULES).unwrap();
+        let ebpf_path = dir.join("module.o");
+        fs::write(&ebpf_path, b"some eBPF object bytes").unwrap();
+
+        // Records the hash of the found object.
+        update_ebpf_sha256_in_rules(&rules_path, &[dir.join("missing.o"), ebpf_path.clone()])
+            .unwrap();
+        let config: RulesConfig =
+            serde_json::from_str(&fs::read_to_string(&rules_path).unwrap()).unwrap();
+        let recorded = config.ebpf_sha256.unwrap();
+        assert_eq!(recorded.len(), 64);
+
+        // Recomputing must yield the same value (stable signing input).
+        update_ebpf_sha256_in_rules(&rules_path, std::slice::from_ref(&ebpf_path)).unwrap();
+        let config: RulesConfig =
+            serde_json::from_str(&fs::read_to_string(&rules_path).unwrap()).unwrap();
+        assert_eq!(config.ebpf_sha256.as_deref(), Some(recorded.as_str()));
+
+        // No candidate found -> field cleared instead of keeping a stale hash.
+        update_ebpf_sha256_in_rules(&rules_path, &[dir.join("nope.o")]).unwrap();
+        let config: RulesConfig =
+            serde_json::from_str(&fs::read_to_string(&rules_path).unwrap()).unwrap();
+        assert_eq!(config.ebpf_sha256, None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_rules_yar_sha256_in_rules_records_and_clears() {
+        let dir = temp_dir("yaryarhash");
+        let rules_path = dir.join("rules.json");
+        fs::write(&rules_path, SAMPLE_RULES).unwrap();
+        let yar_path = dir.join("rules.yar");
+        fs::write(&yar_path, b"rule dummy { condition: false }").unwrap();
+
+        update_rules_yar_sha256_in_rules(&rules_path, std::slice::from_ref(&yar_path)).unwrap();
+        let config: RulesConfig =
+            serde_json::from_str(&fs::read_to_string(&rules_path).unwrap()).unwrap();
+        let recorded = config.rules_yar_sha256.unwrap();
+        assert_eq!(recorded.len(), 64);
+
+        // Missing candidate -> field cleared (no stale hash kept).
+        update_rules_yar_sha256_in_rules(&rules_path, &[dir.join("nope.yar")]).unwrap();
+        let config: RulesConfig =
+            serde_json::from_str(&fs::read_to_string(&rules_path).unwrap()).unwrap();
+        assert_eq!(config.rules_yar_sha256, None);
 
         let _ = fs::remove_dir_all(&dir);
     }

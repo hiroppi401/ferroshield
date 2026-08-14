@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -454,6 +454,45 @@ pub fn is_mining_port(port: u16) -> bool {
     matches!(port, 3333 | 4444 | 5555 | 7777 | 8888 | 14444)
 }
 
+/// Computes the SHA-256 of a file as a lowercase hex string.
+pub fn file_sha256(path: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut file = File::open(path)?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Verifies that the file at `path` matches `expected_sha256` (lowercase hex).
+/// Used to guarantee the eBPF module loaded into the kernel has not been
+/// tampered with since it was recorded in the signed rules.json.
+pub fn verify_file_sha256(path: &Path, expected_sha256: &str) -> Result<(), String> {
+    let actual = file_sha256(path).map_err(|e| {
+        format!(
+            "Gagal membaca {} untuk verifikasi SHA-256: {}",
+            path.display(),
+            e
+        )
+    })?;
+    if !actual.eq_ignore_ascii_case(expected_sha256.trim()) {
+        return Err(format!(
+            "Verifikasi SHA-256 gagal untuk {}: hash tidak cocok (ditemukan {}, diharapkan {}). Modul eBPF ditolak, fallback procfs.",
+            path.display(),
+            actual,
+            expected_sha256
+        ));
+    }
+    Ok(())
+}
+
+use crate::contain::{self, ContainStrategy};
 use crate::quarantine::QuarantineManager;
 use crate::scanner::Scanner;
 use crate::utils::{log_detection, log_message};
@@ -479,6 +518,7 @@ pub struct EbpfMonitor {
     scanner: Scanner,
     quarantine: QuarantineManager,
     action: String,
+    contain_strategy: ContainStrategy,
 }
 
 pub fn get_process_executable_path(pid: u32) -> Option<String> {
@@ -495,10 +535,24 @@ impl EbpfMonitor {
         scanner: Scanner,
         quarantine: QuarantineManager,
         action: &str,
+        expected_sha256: Option<&str>,
+        contain_strategy: ContainStrategy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let bpf_path = "/usr/lib/ferroshield/ferroshield_ebpf.o";
         if !Path::new(bpf_path).exists() {
             return Err("eBPF object file not found at /usr/lib/ferroshield/ferroshield_ebpf.o. Silakan pasang modul kernel FerroShield.".into());
+        }
+        if let Some(expected) = expected_sha256 {
+            verify_file_sha256(Path::new(bpf_path), expected)?;
+            log_message(&format!(
+                "[+] eBPF: Verifikasi SHA-256 {} berhasil (aman untuk dimuat).",
+                bpf_path
+            ));
+        } else {
+            log_message(&format!(
+                "[-] eBPF: Tidak ada hash SHA-256 referensi di rules.json (ruleset lama). Melewati verifikasi modul {}.",
+                bpf_path
+            ));
         }
         let data = std::fs::read(bpf_path)?;
         let mut bpf = Bpf::load(&data)?;
@@ -535,6 +589,7 @@ impl EbpfMonitor {
             scanner,
             quarantine,
             action: action.to_string(),
+            contain_strategy,
         })
     }
 
@@ -592,6 +647,7 @@ impl EbpfMonitor {
         let net_scanner = self.scanner.clone();
         let net_quarantine = self.quarantine.clone();
         let net_action = self.action.clone();
+        let contain_strategy = self.contain_strategy;
 
         std::thread::scope(|s| {
             for mut buf in buffers {
@@ -624,7 +680,11 @@ impl EbpfMonitor {
                                             proc_name, ev.pid, remote_ip
                                         ));
 
-                                        // 1. Quarantine or delete binary FIRST (isolates file before process kill)
+                                        // 0. Freeze the process tree first (anti-mutation)
+                                        let containment =
+                                            contain::contain_process(ev.pid, contain_strategy);
+
+                                        // 1. Quarantine or delete binary (safe while frozen)
                                         if let Some(proc_path) = get_process_executable_path(ev.pid) {
                                             let proc_path_ref = Path::new(&proc_path);
                                             if proc_path_ref.exists() && proc_path_ref.is_file() {
@@ -636,11 +696,18 @@ impl EbpfMonitor {
                                             }
                                         }
 
-                                        // 2. Block IP via iptables SECOND
+                                        // 2. Block IP via iptables
                                         let _ = block_ip(&remote_ip);
 
-                                        // 3. Kill process PID THIRD
-                                        let _ = kill_process(ev.pid);
+                                        // 3. Kill the frozen process tree
+                                        match &containment {
+                                            Some(c) => {
+                                                let _ = contain::kill_contained(c);
+                                            }
+                                            None => {
+                                                let _ = kill_process(ev.pid);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -663,8 +730,18 @@ pub fn init_ebpf_monitor(
     scanner: Scanner,
     quarantine: QuarantineManager,
     action: &str,
+    expected_sha256: Option<&str>,
+    contain_strategy: ContainStrategy,
 ) -> Result<EbpfMonitor, Box<dyn std::error::Error>> {
-    EbpfMonitor::new(ips, domains, scanner, quarantine, action)
+    EbpfMonitor::new(
+        ips,
+        domains,
+        scanner,
+        quarantine,
+        action,
+        expected_sha256,
+        contain_strategy,
+    )
 }
 
 #[cfg(test)]
@@ -707,6 +784,36 @@ mod tests {
         );
         assert_eq!(parse_nft_handle("table ip filter {"), None);
         assert_eq!(parse_nft_handle(""), None);
+    }
+
+    #[test]
+    fn test_verify_file_sha256_rejects_tampered_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroshield_ebpf_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("module.o");
+        fs::write(&path, b"bpf module bytes").unwrap();
+
+        let hash = file_sha256(&path).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Correct hash (case-insensitive) passes.
+        assert!(verify_file_sha256(&path, &hash.to_uppercase()).is_ok());
+        assert!(verify_file_sha256(&path, &hash).is_ok());
+
+        // A single changed byte must be rejected.
+        fs::write(&path, b"bpf module bytz").unwrap();
+        assert!(verify_file_sha256(&path, &hash).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

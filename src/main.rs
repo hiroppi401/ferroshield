@@ -1,5 +1,6 @@
 mod browser;
 mod config;
+mod contain;
 mod feed;
 mod network;
 mod quarantine;
@@ -13,6 +14,7 @@ use quarantine::QuarantineManager;
 use scanner::Scanner;
 use utils::{log_detection, log_message};
 
+use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -87,21 +89,7 @@ fn main() {
             return;
         }
         "sign-rules" => {
-            println!("[*] Menandatangani rules.json memakai rules.key...");
-            let rules_path = "rules.json";
-            let key_path = "rules.key";
-            if !Path::new(key_path).exists() {
-                eprintln!(
-                    "[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu."
-                );
-                return;
-            }
-            match config::sign_rules(rules_path, key_path) {
-                Ok(_) => println!(
-                    "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
-                ),
-                Err(e) => eprintln!("[-] Gagal menandatangani rules: {}", e),
-            }
+            sign_rules_with_ebpf_hash();
             return;
         }
         "update-feed" => {
@@ -218,8 +206,13 @@ fn main() {
     let runtime_config = config::load_runtime_config();
     let default_action = config::effective_default_action(&runtime_config, &rules_config);
     let downloads_dir = config::effective_downloads_dir(&runtime_config, &rules_config);
+    let contain_strategy = config::effective_contain_strategy(&runtime_config);
 
-    let scanner = Scanner::new(rules_config.rules.clone(), 10);
+    let scanner = Scanner::new(
+        rules_config.rules.clone(),
+        10,
+        rules_config.rules_yar_sha256.as_deref(),
+    );
 
     match command {
         "scan" => {
@@ -289,44 +282,49 @@ fn main() {
                                         conn.remote_ip
                                     ));
 
-                                    // 1. Quarantining/Deleting binary FIRST (so watchdog process cannot re-execute file from disk)
-                                    if let Some(pid) = conn.pid {
+                                    // 1. Freeze the whole process tree FIRST so the running
+                                    //    malware cannot mutate, spawn children, or react to
+                                    //    the on-disk cleanup (anti-mutation / anti-respawn).
+                                    let containment = conn.pid.and_then(|pid| {
                                         log_detection(&format!(
                                             "[!] Proses berbahaya terdeteksi: PID {} ({:?})",
                                             pid, conn.process_name
                                         ));
+                                        contain::contain_process(pid, contain_strategy)
+                                    });
 
-                                        if let Some(ref proc_name) = conn.process_name {
-                                            let proc_path = Path::new(proc_name);
-                                            if proc_path.exists() && proc_path.is_file() {
-                                                if net_action == "delete" {
-                                                    if let Err(e) = std::fs::remove_file(proc_path)
-                                                    {
-                                                        log_message(&format!(
-                                                            "[-] Gagal menghapus file proses berbahaya: {}",
-                                                            e
-                                                        ));
-                                                    } else {
-                                                        log_message(
-                                                            "[+] File eksekusi proses berbahaya berhasil dihapus permanen.",
-                                                        );
-                                                    }
+                                    // 2. Quarantine/delete the binary (safe now: process is frozen)
+                                    if conn.pid.is_some()
+                                        && let Some(ref proc_name) = conn.process_name
+                                    {
+                                        let proc_path = Path::new(proc_name);
+                                        if proc_path.exists() && proc_path.is_file() {
+                                            if net_action == "delete" {
+                                                if let Err(e) = std::fs::remove_file(proc_path) {
+                                                    log_message(&format!(
+                                                        "[-] Gagal menghapus file proses berbahaya: {}",
+                                                        e
+                                                    ));
                                                 } else {
-                                                    if let Ok((sha, _)) =
-                                                        net_scanner.calculate_hashes(proc_path)
-                                                    {
-                                                        let _ = net_quarantine.quarantine_file(
-                                                            proc_path,
-                                                            &sha,
-                                                            "NETWORK-BREACH-PID",
-                                                        );
-                                                    }
+                                                    log_message(
+                                                        "[+] File eksekusi proses berbahaya berhasil dihapus permanen.",
+                                                    );
+                                                }
+                                            } else {
+                                                if let Ok((sha, _)) =
+                                                    net_scanner.calculate_hashes(proc_path)
+                                                {
+                                                    let _ = net_quarantine.quarantine_file(
+                                                        proc_path,
+                                                        &sha,
+                                                        "NETWORK-BREACH-PID",
+                                                    );
                                                 }
                                             }
                                         }
                                     }
 
-                                    // 2. Block the remote IP via firewall SECOND
+                                    // 3. Block the remote IP via firewall
                                     if let Err(e) = network::block_ip(&conn.remote_ip) {
                                         log_message(&format!(
                                             "[-] Gagal memblokir IP {} di firewall: {}",
@@ -339,18 +337,35 @@ fn main() {
                                         ));
                                     }
 
-                                    // 3. Send KILL signal to PID THIRD (after binary is isolated & IP blocked)
+                                    // 4. Kill the (frozen) process tree LAST
                                     if let Some(pid) = conn.pid {
-                                        if let Err(e) = network::kill_process(pid) {
-                                            log_message(&format!(
-                                                "[-] Gagal menghentikan PID {}: {}",
-                                                pid, e
-                                            ));
-                                        } else {
-                                            log_message(&format!(
-                                                "[+] Berhasil menghentikan PID {}",
-                                                pid
-                                            ));
+                                        match &containment {
+                                            Some(c) => {
+                                                if let Err(e) = contain::kill_contained(c) {
+                                                    log_message(&format!(
+                                                        "[-] Gagal menghentikan PID {}: {}",
+                                                        pid, e
+                                                    ));
+                                                } else {
+                                                    log_message(&format!(
+                                                        "[+] Berhasil menghentikan PID {}",
+                                                        pid
+                                                    ));
+                                                }
+                                            }
+                                            None => {
+                                                if let Err(e) = network::kill_process(pid) {
+                                                    log_message(&format!(
+                                                        "[-] Gagal menghentikan PID {}: {}",
+                                                        pid, e
+                                                    ));
+                                                } else {
+                                                    log_message(&format!(
+                                                        "[+] Berhasil menghentikan PID {}",
+                                                        pid
+                                                    ));
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -366,6 +381,8 @@ fn main() {
                     (*net_scanner).clone(),
                     (*net_quarantine).clone(),
                     &net_action,
+                    net_config.ebpf_sha256.as_deref(),
+                    contain_strategy,
                 ) {
                     Ok(mut ebpf_monitor) => {
                         log_message("[+] Monitor Jaringan: eBPF aktif secara real-time!");
@@ -459,6 +476,10 @@ fn main() {
             let miner_scanner = scanner_arc.clone();
             let miner_quarantine = quarantine_arc.clone();
             let miner_action = default_action.clone();
+            let miner_blacklist = rules_config.network_blacklist.ips.clone();
+            let miner_require_secondary = runtime_config
+                .miner_detection_require_secondary_signal
+                .unwrap_or(true);
             let miner_handle = thread::spawn(move || {
                 log_message(
                     "[*] Monitor Miner: Memulai perlindungan terhadap malware crypto miner...",
@@ -486,7 +507,11 @@ fn main() {
                             pid, path_str
                         ));
 
-                        // 1. Remove or quarantine the malicious executable FIRST (prevents watchdog respawn)
+                        // 0. Freeze the process tree first (anti-mutation): a frozen
+                        //    process cannot write new files or fork while we neutralize it.
+                        let containment = contain::contain_process(pid, contain_strategy);
+
+                        // 1. Remove or quarantine the malicious executable (safe while frozen)
                         let proc_path = Path::new(&path_str);
                         if proc_path.exists() && proc_path.is_file() {
                             if miner_action == "delete" {
@@ -516,19 +541,41 @@ fn main() {
                             }
                         }
 
-                        // 2. Kill process SECOND (after binary on disk is neutralized)
-                        if let Err(e) = network::kill_process(pid) {
-                            log_message(&format!("[-] Gagal menghentikan PID {}: {}", pid, e));
-                        } else {
-                            log_message(&format!(
-                                "[+] Berhasil menghentikan PID {} untuk mencegah eksploitasi.",
-                                pid
-                            ));
+                        // 2. Kill the frozen process tree SECOND
+                        match &containment {
+                            Some(c) => {
+                                if let Err(e) = contain::kill_contained(c) {
+                                    log_message(&format!(
+                                        "[-] Gagal menghentikan PID {}: {}",
+                                        pid, e
+                                    ));
+                                } else {
+                                    log_message(&format!(
+                                        "[+] Berhasil menghentikan PID {} untuk mencegah eksploitasi.",
+                                        pid
+                                    ));
+                                }
+                            }
+                            None => {
+                                if let Err(e) = network::kill_process(pid) {
+                                    log_message(&format!(
+                                        "[-] Gagal menghentikan PID {}: {}",
+                                        pid, e
+                                    ));
+                                } else {
+                                    log_message(&format!(
+                                        "[+] Berhasil menghentikan PID {} untuk mencegah eksploitasi.",
+                                        pid
+                                    ));
+                                }
+                            }
                         }
                     }
 
                     // Check 2: Active connections to mining ports
                     if let Ok(conns) = network::get_active_connections() {
+                        let whitelist: HashSet<String> =
+                            crate::utils::load_whitelist().into_iter().collect();
                         for conn in conns {
                             if network::is_mining_port(conn.remote_port) {
                                 log_detection(&format!(
@@ -536,7 +583,33 @@ fn main() {
                                     conn.remote_port
                                 ));
 
-                                // 1. Quarantine or delete binary FIRST
+                                // A port match alone only alerts. Destructive
+                                // actions require a second signal (blacklisted IP
+                                // or a binary running from a suspicious temp dir)
+                                // unless explicitly disabled in config.json.
+                                let exe_path =
+                                    conn.pid.and_then(network::get_process_executable_path);
+                                let should_act = miner_connection_warrants_action(
+                                    &conn.remote_ip,
+                                    exe_path.as_deref(),
+                                    &miner_blacklist,
+                                    &whitelist,
+                                    miner_require_secondary,
+                                );
+                                if !should_act {
+                                    log_message(&format!(
+                                        "[*] Koneksi port mining {} hanya diberi alert (tanpa sinyal kedua), PID {:?} ({:?}).",
+                                        conn.remote_port, conn.pid, conn.process_name
+                                    ));
+                                    continue;
+                                }
+
+                                // 0. Freeze the process tree first (anti-mutation)
+                                let containment = conn.pid.and_then(|pid| {
+                                    contain::contain_process(pid, contain_strategy)
+                                });
+
+                                // 1. Quarantine or delete binary (safe while frozen)
                                 if let Some(ref proc_name) = conn.process_name {
                                     let proc_path = Path::new(proc_name);
                                     if proc_path.exists() && proc_path.is_file() {
@@ -556,21 +629,38 @@ fn main() {
                                     }
                                 }
 
-                                // 2. Block the mining pool IP address SECOND
+                                // 2. Block the mining pool IP address
                                 let _ = network::block_ip(&conn.remote_ip);
 
-                                // 3. Kill associated process THIRD (after binary isolation & IP block)
+                                // 3. Kill the frozen process tree (after binary isolation & IP block)
                                 if let Some(pid) = conn.pid {
-                                    if let Err(e) = network::kill_process(pid) {
-                                        log_message(&format!(
-                                            "[-] Gagal menghentikan proses miner PID {}: {}",
-                                            pid, e
-                                        ));
-                                    } else {
-                                        log_message(&format!(
-                                            "[+] Berhasil menghentikan proses miner PID {}",
-                                            pid
-                                        ));
+                                    match &containment {
+                                        Some(c) => {
+                                            if let Err(e) = contain::kill_contained(c) {
+                                                log_message(&format!(
+                                                    "[-] Gagal menghentikan proses miner PID {}: {}",
+                                                    pid, e
+                                                ));
+                                            } else {
+                                                log_message(&format!(
+                                                    "[+] Berhasil menghentikan proses miner PID {}",
+                                                    pid
+                                                ));
+                                            }
+                                        }
+                                        None => {
+                                            if let Err(e) = network::kill_process(pid) {
+                                                log_message(&format!(
+                                                    "[-] Gagal menghentikan proses miner PID {}: {}",
+                                                    pid, e
+                                                ));
+                                            } else {
+                                                log_message(&format!(
+                                                    "[+] Berhasil menghentikan proses miner PID {}",
+                                                    pid
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -628,7 +718,11 @@ fn main() {
                                                     pid, exe_path, usage
                                                 ));
 
-                                                // 1. Quarantine/Delete process binary FIRST (prevents watchdog process resurrection)
+                                                // 0. Freeze the process tree first (anti-mutation)
+                                                let containment =
+                                                    contain::contain_process(pid, contain_strategy);
+
+                                                // 1. Quarantine/Delete process binary (safe while frozen)
                                                 let proc_path = Path::new(&exe_path);
                                                 if proc_path.exists() && proc_path.is_file() {
                                                     if miner_action == "delete" {
@@ -644,8 +738,15 @@ fn main() {
                                                     }
                                                 }
 
-                                                // 2. Terminate process SECOND
-                                                let _ = network::kill_process(pid);
+                                                // 2. Terminate the frozen process tree SECOND
+                                                match &containment {
+                                                    Some(c) => {
+                                                        let _ = contain::kill_contained(c);
+                                                    }
+                                                    None => {
+                                                        let _ = network::kill_process(pid);
+                                                    }
+                                                }
                                             }
                                         }
                                     } else {
@@ -782,21 +883,7 @@ fn main() {
             }
         }
         "sign-rules" => {
-            println!("[*] Menandatangani rules.json memakai rules.key...");
-            let rules_path = "rules.json";
-            let key_path = "rules.key";
-            if !Path::new(key_path).exists() {
-                eprintln!(
-                    "[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu."
-                );
-                return;
-            }
-            match config::sign_rules(rules_path, key_path) {
-                Ok(_) => println!(
-                    "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
-                ),
-                Err(e) => eprintln!("[-] Gagal menandatangani rules: {}", e),
-            }
+            sign_rules_with_ebpf_hash();
         }
         "update-feed" => {
             println!("[*] Memulai pembaruan threat feed secara manual...");
@@ -836,6 +923,47 @@ mod sudo {
     }
 }
 
+fn sign_rules_with_ebpf_hash() {
+    println!("[*] Menandatangani rules.json memakai rules.key...");
+    let rules_path = "rules.json";
+    let key_path = "rules.key";
+    if !Path::new(key_path).exists() {
+        eprintln!("[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu.");
+        return;
+    }
+    // Record the SHA-256 of the installed eBPF module and of rules.yar in the
+    // signed rules.json so both the kernel module and the YARA ruleset cannot be
+    // replaced undetected. Candidate paths are tried in order: installed location,
+    // then in-tree / packaged object files.
+    match config::update_ebpf_sha256_in_rules(
+        rules_path,
+        &[
+            PathBuf::from("/usr/lib/ferroshield/ferroshield_ebpf.o"),
+            PathBuf::from("src/ebpf/ferroshield_ebpf.o"),
+            PathBuf::from("ferroshield_ebpf.o"),
+        ],
+    ) {
+        Ok(_) => println!("[+] Hash eBPF dicatat di rules.json (ebpf_sha256)."),
+        Err(e) => eprintln!("[-] Gagal mencatat hash eBPF: {}", e),
+    }
+    match config::update_rules_yar_sha256_in_rules(
+        rules_path,
+        &[
+            PathBuf::from("/etc/ferroshield/rules.yar"),
+            PathBuf::from("rules.yar"),
+        ],
+    ) {
+        Ok(_) => println!("[+] Hash rules.yar dicatat di rules.json (rules_yar_sha256)."),
+        Err(e) => eprintln!("[-] Gagal mencatat hash rules.yar: {}", e),
+    }
+    match config::sign_rules(rules_path, key_path) {
+        Ok(_) => println!(
+            "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
+        ),
+        Err(e) => eprintln!("[-] Gagal menandatangani rules: {}", e),
+    }
+}
+
 fn get_cpu_cores() -> usize {
     if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
         content
@@ -860,4 +988,125 @@ fn get_process_cpu_time(pid: u32) -> Option<(u64, u64)> {
     let utime = parts[11].parse::<u64>().ok()?;
     let stime = parts[12].parse::<u64>().ok()?;
     Some((utime, stime))
+}
+
+/// True when an executable path lives in a suspicious temp/shared-memory dir.
+fn is_suspicious_temp_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.starts_with("/tmp/")
+        || lower.starts_with("/var/tmp/")
+        || lower.starts_with("/dev/shm/")
+        || lower.starts_with("/run/user/")
+}
+
+/// Decides whether a mining-port connection warrants a destructive response
+/// (delete/quarantine binary, block IP, kill process). A port match alone only
+/// alerts; a second signal (blacklisted remote IP or binary running from a
+/// suspicious temp path) is required before any destructive action, unless
+/// `require_secondary_signal` is disabled. Whitelisted executables never trigger.
+fn miner_connection_warrants_action(
+    remote_ip: &str,
+    exe_path: Option<&str>,
+    blacklist_ips: &[String],
+    whitelist: &HashSet<String>,
+    require_secondary_signal: bool,
+) -> bool {
+    if !require_secondary_signal {
+        return true;
+    }
+    let ip_blacklisted = blacklist_ips.iter().any(|ip| ip == remote_ip);
+    let suspicious_path = exe_path.map(is_suspicious_temp_path).unwrap_or(false);
+    let whitelisted = exe_path.map(|p| whitelist.contains(p)).unwrap_or(false);
+    (ip_blacklisted || suspicious_path) && !whitelisted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn whitelist_of(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn test_miner_port_only_connection_is_alert_only() {
+        // A connection to a mining port with no second signal (no blacklisted IP,
+        // no suspicious path) must NOT trigger destructive actions by default.
+        let whitelist = HashSet::new();
+        let blacklist: Vec<String> = vec![];
+        assert!(network::is_mining_port(3333));
+        assert!(!miner_connection_warrants_action(
+            "203.0.113.1",
+            None,
+            &blacklist,
+            &whitelist,
+            true
+        ));
+        assert!(!miner_connection_warrants_action(
+            "203.0.113.1",
+            Some("/usr/bin/legit-daemon"),
+            &blacklist,
+            &whitelist,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_miner_blacklisted_ip_triggers_action() {
+        let blacklist = vec!["185.112.146.12".to_string()];
+        assert!(miner_connection_warrants_action(
+            "185.112.146.12",
+            None,
+            &blacklist,
+            &HashSet::new(),
+            true
+        ));
+    }
+
+    #[test]
+    fn test_miner_suspicious_temp_path_triggers_action() {
+        for path in [
+            "/tmp/xmrig",
+            "/var/tmp/xmrig",
+            "/dev/shm/xmrig",
+            "/run/user/1000/xmrig",
+        ] {
+            assert!(
+                is_suspicious_temp_path(path),
+                "{path} should be a suspicious temp path"
+            );
+            assert!(miner_connection_warrants_action(
+                "203.0.113.1",
+                Some(path),
+                &[],
+                &HashSet::new(),
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn test_miner_action_respects_whitelist() {
+        // Even with a secondary signal, an explicitly whitelisted executable is spared.
+        let whitelist = whitelist_of(&["/tmp/xmrig"]);
+        assert!(!miner_connection_warrants_action(
+            "203.0.113.1",
+            Some("/tmp/xmrig"),
+            &[],
+            &whitelist,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_miner_disabled_secondary_signal_acts_on_port() {
+        // Opt-out via config.json restores the legacy port-only behavior.
+        assert!(miner_connection_warrants_action(
+            "203.0.113.1",
+            None,
+            &[],
+            &HashSet::new(),
+            false
+        ));
+    }
 }

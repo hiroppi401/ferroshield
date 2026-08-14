@@ -10,7 +10,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use walkdir::WalkDir;
-use yara_x::{Compiler, Rules as YaraRules, Scanner as YaraScanner};
+use yara_x::{Compiler, Rules as YaraRules, ScanError, Scanner as YaraScanner};
+
+/// Per-scan timeout for the YARA engine. Third-party rulesets can contain
+/// regexes with pathological backtracking (ReDoS); this bounds the time a
+/// single file may spend in YARA so a bad rule cannot stall Browser Guard or
+/// the scan daemon.
+const YARA_SCAN_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Logs the YARA timeout warning only once per process to avoid flooding logs.
+static YARA_TIMEOUT_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub struct ScanResult {
     pub file_path: String,
@@ -26,7 +36,11 @@ pub struct Scanner {
 }
 
 impl Scanner {
-    pub fn new(rules: Vec<Rule>, throttle_ms: u64) -> Self {
+    pub fn new(
+        rules: Vec<Rule>,
+        throttle_ms: u64,
+        expected_rules_yar_sha256: Option<&str>,
+    ) -> Self {
         let mut compiled_regexes = Vec::new();
         for rule in &rules {
             if let Some(ref patterns) = rule.signatures.patterns {
@@ -40,16 +54,23 @@ impl Scanner {
 
         // Attempt to load and compile rules.yar if it exists
         let yara_rules = if Path::new("rules.yar").exists() {
-            let mut compiler = Compiler::new();
-            if let Ok(content) = std::fs::read_to_string("rules.yar") {
-                if compiler.add_source(content.as_str()).is_ok() {
-                    Some(Arc::new(compiler.build()))
+            // Verify rules.yar integrity against the hash recorded in the signed
+            // rules.json. A mismatch disables YARA with a clear warning instead
+            // of silently accepting a tampered ruleset.
+            if !yara_ruleset_integrity_ok(expected_rules_yar_sha256) {
+                None
+            } else {
+                let mut compiler = Compiler::new();
+                if let Ok(content) = std::fs::read_to_string("rules.yar") {
+                    if compiler.add_source(content.as_str()).is_ok() {
+                        Some(Arc::new(compiler.build()))
+                    } else {
+                        eprintln!("[-] Gagal kompilasi rules.yar");
+                        None
+                    }
                 } else {
-                    eprintln!("[-] Gagal kompilasi rules.yar");
                     None
                 }
-            } else {
-                None
             }
         } else {
             None
@@ -59,6 +80,29 @@ impl Scanner {
             rules,
             compiled_regexes,
             yara_rules,
+            throttle_ms,
+        }
+    }
+
+    /// Constructs a scanner without loading the YARA ruleset. Only hash/regex
+    /// scanning is available. Used by unit tests that would otherwise spend
+    /// tens of seconds compiling the full rules.yar.
+    #[cfg(test)]
+    pub fn without_yara(rules: Vec<Rule>, throttle_ms: u64) -> Self {
+        let mut compiled_regexes = Vec::new();
+        for rule in &rules {
+            if let Some(ref patterns) = rule.signatures.patterns {
+                for pattern in patterns {
+                    if let Ok(re) = Regex::new(pattern) {
+                        compiled_regexes.push((rule.id.clone(), re));
+                    }
+                }
+            }
+        }
+        Self {
+            rules,
+            compiled_regexes,
+            yara_rules: None,
             throttle_ms,
         }
     }
@@ -211,24 +255,39 @@ impl Scanner {
                 // B. YARA-X Check
                 if let Some(ref yara_rules) = self.yara_rules {
                     let mut yara_scanner = YaraScanner::new(yara_rules);
-                    if let Ok(scan_results) = yara_scanner.scan(&bytes) {
-                        for matched_rule in scan_results.matching_rules() {
-                            let rule_name = matched_rule.identifier();
-                            let rule_id = format!("YARA-{}", rule_name);
-                            let rule = Rule {
-                                id: rule_id.clone(),
-                                name: rule_name.to_string(),
-                                description: format!("Aturan YARA terdeteksi: {}", rule_name),
-                                severity: "High".to_string(),
-                                signatures: crate::config::Signatures {
-                                    hashes: None,
-                                    patterns: None,
-                                    extension_ids: None,
-                                },
-                            };
-                            if !triggered_rules.iter().any(|r| r.id == rule.id) {
-                                triggered_rules.push(rule);
+                    yara_scanner.set_timeout(YARA_SCAN_TIMEOUT);
+                    match yara_scanner.scan(&bytes) {
+                        Ok(scan_results) => {
+                            for matched_rule in scan_results.matching_rules() {
+                                let rule_name = matched_rule.identifier();
+                                let rule_id = format!("YARA-{}", rule_name);
+                                let rule = Rule {
+                                    id: rule_id.clone(),
+                                    name: rule_name.to_string(),
+                                    description: format!("Aturan YARA terdeteksi: {}", rule_name),
+                                    severity: "High".to_string(),
+                                    signatures: crate::config::Signatures {
+                                        hashes: None,
+                                        patterns: None,
+                                        extension_ids: None,
+                                    },
+                                };
+                                if !triggered_rules.iter().any(|r| r.id == rule.id) {
+                                    triggered_rules.push(rule);
+                                }
                             }
+                        }
+                        Err(ScanError::Timeout) => {
+                            if !YARA_TIMEOUT_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                eprintln!(
+                                    "[-] Peringatan: scan YARA timeout pada {:?}. Rule bermasalah diabaikan agar daemon tetap responsif.",
+                                    path_ref
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[-] Gagal scan YARA pada {:?}: {}", path_ref, e);
                         }
                     }
                 }
@@ -353,9 +412,8 @@ impl Scanner {
             "/var/lib/ferroshield/quarantine/",
         ];
 
-        let is_rules_db = |path_str: &str| {
-            path_str.ends_with("rules.yar") || path_str.ends_with("rules.json")
-        };
+        let is_rules_db =
+            |path_str: &str| path_str.ends_with("rules.yar") || path_str.ends_with("rules.json");
 
         let path_ref = dir_path.as_ref();
 
@@ -442,6 +500,32 @@ impl Scanner {
     }
 }
 
+/// True when the rules.yar in the working directory matches the SHA-256 recorded
+/// in the signed rules.json. `None` (legacy rules.json without the field) allows
+/// compilation; a mismatch or unreadable file disables YARA with a clear warning.
+fn yara_ruleset_integrity_ok(expected_rules_yar_sha256: Option<&str>) -> bool {
+    match expected_rules_yar_sha256 {
+        None => true,
+        Some(expected) => match crate::network::file_sha256(Path::new("rules.yar")) {
+            Ok(actual) if actual.eq_ignore_ascii_case(expected.trim()) => true,
+            Ok(actual) => {
+                eprintln!(
+                    "[-] PERINGATAN: SHA-256 rules.yar tidak cocok dengan rules.json (ditemukan {}, diharapkan {}). YARA dinonaktifkan.",
+                    actual, expected
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!(
+                    "[-] Gagal menghitung SHA-256 rules.yar: {}. YARA dinonaktifkan.",
+                    e
+                );
+                false
+            }
+        },
+    }
+}
+
 fn calculate_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -466,9 +550,129 @@ mod tests {
     use super::*;
     use std::fs;
 
+    const PATHOLOGICAL_BASE64_RULE: &str = r#"
+rule base64_packed {
+  strings:
+    $f = /(atob|btoa|;base64|base64,)/ nocase
+    $fff = /([A-Za-z0-9]{4})*([A-Za-z0-9]{2}==|[A-Za-z0-9]{3}=|[A-Za-z0-9]{4})/
+  condition:
+    $f and $fff
+}"#;
+
+    const FIXED_BASE64_RULE: &str = r#"
+rule base64_packed {
+  strings:
+    $f = /(atob|btoa|;base64|base64,)/ nocase
+    $fff = /[A-Za-z0-9]{4}([A-Za-z0-9]{2}==|[A-Za-z0-9]{3}=|[A-Za-z0-9]{4})?/
+  condition:
+    $f and $fff
+}"#;
+
+    fn compile_yara(src: &str) -> YaraRules {
+        let mut compiler = Compiler::new();
+        compiler.add_source(src).expect("rule must compile");
+        compiler.build()
+    }
+
+    #[test]
+    fn test_yara_fixed_base64_regex_scan_is_fast() {
+        // ReDoS regression: the old /([A-Za-z0-9]{4})*.../ pattern made scan time
+        // grow polynomially on long alphanumeric input. The fixed pattern must
+        // complete within the 1s per-scan timeout. Release builds enforce the full
+        // 1 MB requirement; the debug WASM interpreter is ~30x slower, so it uses
+        // a smaller buffer while still proving the scan terminates in-time.
+        let rules = compile_yara(FIXED_BASE64_RULE);
+        let data: Vec<u8> = if cfg!(debug_assertions) {
+            (0..(8 << 10)).map(|i| b"Aa0Zz9"[i % 6]).collect()
+        } else {
+            (0..(1 << 20)).map(|i| b"Aa0Zz9"[i % 6]).collect()
+        };
+
+        let started = std::time::Instant::now();
+        let mut scanner = YaraScanner::new(&rules);
+        scanner.set_timeout(Duration::from_secs(1));
+        assert!(
+            scanner.scan(&data).is_ok(),
+            "fixed regex did not complete within the 1s scan timeout (elapsed {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_yara_scan_timeout_aborts_pathological_rule() {
+        // The unfixed pattern is confirmed pathological (>>30s on 4 MB in
+        // release mode). The per-scan timeout must abort promptly instead of
+        // stalling Browser Guard / the scan daemon.
+        let rules = compile_yara(PATHOLOGICAL_BASE64_RULE);
+        let data = vec![b'a'; 4 << 20]; // 4 MB alphanumeric
+
+        let started = std::time::Instant::now();
+        let mut scanner = YaraScanner::new(&rules);
+        scanner.set_timeout(Duration::from_millis(500));
+        let result = scanner.scan(&data);
+        assert!(matches!(result, Err(ScanError::Timeout)));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout did not abort the scan promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_yara_timeout_does_not_block_scan_file() {
+        // End-to-end: a pathological rule inside a loaded ruleset must not hang
+        // Scanner::scan_file; it should return a scan result (no panic).
+        let rules = compile_yara(PATHOLOGICAL_BASE64_RULE);
+        let scanner = Scanner {
+            rules: vec![],
+            compiled_regexes: vec![],
+            yara_rules: Some(Arc::new(rules)),
+            throttle_ms: 0,
+        };
+
+        // 1 MB is the worst case the pathological pattern can stall on; in debug
+        // mode it would exceed 30s, so the timeout must abort it promptly.
+        let path = Path::new("test_redos_trigger.bin");
+        fs::write(path, vec![b'a'; 1 << 20]).unwrap();
+        let started = std::time::Instant::now();
+        let _ = scanner.scan_file(path);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "scan_file hung on pathological rule: {:?}",
+            started.elapsed()
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_rules_yar_integrity_check_uses_recorded_hash() {
+        // Tests run with CWD = crate root where rules.yar exists. Computing the
+        // real hash makes the assertion independent of the file's contents.
+        let actual = crate::network::file_sha256(Path::new("rules.yar"))
+            .expect("rules.yar must be readable");
+        assert!(yara_ruleset_integrity_ok(Some(&actual)));
+        assert!(
+            yara_ruleset_integrity_ok(None),
+            "legacy rules.json allows compile"
+        );
+        assert!(
+            !yara_ruleset_integrity_ok(Some(
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            )),
+            "a single changed hash must disable YARA"
+        );
+    }
+
     #[test]
     fn test_calculate_hashes_and_tlsh_small() {
-        let scanner = Scanner::new(vec![], 0);
+        // Construct Scanner directly to avoid compiling the full rules.yar (which
+        // takes ~30s in debug) — only hash calculation is exercised here.
+        let scanner = Scanner {
+            rules: vec![],
+            compiled_regexes: vec![],
+            yara_rules: None,
+            throttle_ms: 0,
+        };
         let test_path = Path::new("test_small_file.txt");
         fs::write(test_path, b"too small").unwrap();
 
@@ -485,7 +689,12 @@ mod tests {
 
     #[test]
     fn test_calculate_hashes_and_tlsh_sufficient_size() {
-        let scanner = Scanner::new(vec![], 0);
+        let scanner = Scanner {
+            rules: vec![],
+            compiled_regexes: vec![],
+            yara_rules: None,
+            throttle_ms: 0,
+        };
         let test_path = Path::new("test_large_file.txt");
         // TLSH requires at least 50 bytes of sufficiently varied data
         let mut data = Vec::new();

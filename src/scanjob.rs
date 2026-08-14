@@ -509,15 +509,15 @@ pub fn run_scan(
             if raw_results.is_empty() {
                 println!("[+] Seluruh file dalam direktori aman.");
             } else {
-            println!(
-                "[!] Pemindaian selesai. Ditemukan {} file mencurigakan:",
-                raw_results.len()
-            );
-            crate::utils::log_detection(&format!(
-                "[!] PEMINDAIAN SELESAI: Ditemukan {} file mencurigakan!",
-                raw_results.len()
-            ));
-            for res in &raw_results {
+                println!(
+                    "[!] Pemindaian selesai. Ditemukan {} file mencurigakan:",
+                    raw_results.len()
+                );
+                crate::utils::log_detection(&format!(
+                    "[!] PEMINDAIAN SELESAI: Ditemukan {} file mencurigakan!",
+                    raw_results.len()
+                ));
+                for res in &raw_results {
                     println!("\n[!] File: {}", res.file_path);
                     for rule in &res.triggered_rules {
                         println!("    -> Aturan: {} [{}]", rule.name, rule.id);

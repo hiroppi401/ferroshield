@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
 
 /// How often the downloads watcher re-discovers user download folders so that
@@ -181,10 +181,7 @@ pub fn get_downloads_dirs(custom_path: Option<&str>) -> Vec<PathBuf> {
 }
 
 /// Returns download directories that are not yet being watched.
-pub fn find_unwatched_dirs(
-    watched: &HashSet<PathBuf>,
-    custom_path: Option<&str>,
-) -> Vec<PathBuf> {
+pub fn find_unwatched_dirs(watched: &HashSet<PathBuf>, custom_path: Option<&str>) -> Vec<PathBuf> {
     get_downloads_dirs(custom_path)
         .into_iter()
         .filter(|p| !watched.contains(p))
@@ -219,7 +216,7 @@ pub fn watch_downloads_directories(
     loop {
         match rx.recv_timeout(DOWNLOADS_RESCAN_INTERVAL) {
             Ok(Ok(event)) => {
-                handle_watch_event(event, &scanner, &quarantine_mgr, action);
+                handle_watch_event(event, &scanner, &quarantine_mgr, action, &watched);
             }
             Ok(Err(e)) => eprintln!("[-] Watcher error: {:?}", e),
             Err(RecvTimeoutError::Timeout) => {
@@ -246,15 +243,47 @@ pub fn watch_downloads_directories(
     }
 }
 
+/// Resolves `path` via `fs::canonicalize` and returns it only when the resolved
+/// file still lives inside one of the canonical watched roots. Symlinks that
+/// point outside the watched directory resolve to a path outside the roots and
+/// are therefore rejected (returns `None`). This is the anti-TOCTOU gate applied
+/// both before scanning and immediately before any delete/quarantine.
+fn resolve_inside_watched(path: &Path, canonical_roots: &[PathBuf]) -> Option<PathBuf> {
+    let resolved = fs::canonicalize(path).ok()?;
+    canonical_roots
+        .iter()
+        .find(|root| resolved.starts_with(root))
+        .map(|_| resolved)
+}
+
+/// Canonicalizes the watched roots once per event batch.
+fn canonicalize_watched_roots(watched_roots: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    watched_roots
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .collect()
+}
+
 /// Scans a newly created/modified file in a watched download folder.
+///
+/// Anti-TOCTOU: the path is canonicalized and containment-checked against the
+/// watched directories both before scanning and immediately before any
+/// delete/quarantine. Symlinks are rejected outright, so a race that swaps a
+/// downloaded file for a symlink can never redirect deletion outside Downloads.
 fn handle_watch_event(
     event: notify::Event,
     scanner: &Scanner,
     quarantine_mgr: &QuarantineManager,
     action: &str,
+    watched_roots: &HashSet<PathBuf>,
 ) {
     // We are interested in file creations, modifications, or renames (browsers rename temp files after download)
     if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+        return;
+    }
+
+    let canonical_roots = canonicalize_watched_roots(watched_roots);
+    if canonical_roots.is_empty() {
         return;
     }
 
@@ -266,12 +295,33 @@ fn handle_watch_event(
             continue;
         }
 
-        if path.is_file() {
+        // Reject symlinks without following them. A symlinked path could be
+        // re-pointed by an attacker between detection and action (TOCTOU).
+        if let Ok(meta) = fs::symlink_metadata(&path)
+            && meta.file_type().is_symlink()
+        {
+            println!(
+                "[-] Browser Guard: Lewati symlink {:?} (anti-TOCTOU).",
+                path
+            );
+            continue;
+        }
+
+        // Resolve and ensure containment in a watched Downloads directory.
+        let Some(resolved) = resolve_inside_watched(&path, &canonical_roots) else {
+            println!(
+                "[-] Browser Guard: Lewati {:?}: di luar direktori yang dipantau (anti-TOCTOU).",
+                path
+            );
+            continue;
+        };
+
+        if resolved.is_file() {
             // Give the browser a split second to finish writing the file handle
             std::thread::sleep(Duration::from_millis(500));
-            println!("[*] Browser Guard: Detecting new file: {:?}", path);
+            println!("[*] Browser Guard: Detecting new file: {:?}", resolved);
 
-            if let Some(scan_res) = scanner.scan_file(&path) {
+            if let Some(scan_res) = scanner.scan_file(&resolved) {
                 for rule in &scan_res.triggered_rules {
                     crate::utils::log_detection(&format!(
                         "[!] MALWARE DETECTED in downloaded file: {:?} -> Rule: {} (Severity: {})",
@@ -280,7 +330,17 @@ fn handle_watch_event(
                 }
 
                 if action == "delete" {
-                    match fs::remove_file(&path) {
+                    // Re-resolve right before the destructive operation to close
+                    // the TOCTOU window opened between scan and delete.
+                    let Some(final_path) = resolve_inside_watched(&resolved, &canonical_roots)
+                    else {
+                        println!(
+                            "[-] Browser Guard: Batal menghapus {:?}: path berubah di luar direktori yang dipantau (anti-TOCTOU).",
+                            resolved
+                        );
+                        continue;
+                    };
+                    match fs::remove_file(&final_path) {
                         Ok(_) => println!(
                             "[+] Successfully deleted malicious file permanently: {}",
                             scan_res.file_path
@@ -291,16 +351,23 @@ fn handle_watch_event(
                         ),
                     }
                 } else {
+                    // Re-resolve before quarantining as well.
+                    let Some(final_path) = resolve_inside_watched(&resolved, &canonical_roots)
+                    else {
+                        println!(
+                            "[-] Browser Guard: Batal karantina {:?}: path berubah di luar direktori yang dipantau (anti-TOCTOU).",
+                            resolved
+                        );
+                        continue;
+                    };
                     // Get the sha256 to use as an identifier in quarantine
-                    if let Ok((sha256, _)) = scanner.calculate_hashes(&path) {
+                    if let Ok((sha256, _)) = scanner.calculate_hashes(&final_path) {
                         let rule_id = scan_res
                             .triggered_rules
                             .first()
                             .map(|r| r.id.as_str())
                             .unwrap_or("BROWSER-GUARD");
-                        match quarantine_mgr
-                            .quarantine_file(&path, &sha256, rule_id)
-                        {
+                        match quarantine_mgr.quarantine_file(&final_path, &sha256, rule_id) {
                             Ok(q_id) => println!(
                                 "[+] Successfully quarantined file: {} -> ID: {}",
                                 scan_res.file_path, q_id
@@ -453,6 +520,7 @@ pub fn clean_hosts_file() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{CreateKind, EventAttributes};
     use std::fs;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -471,6 +539,125 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_inside_watched_rejects_outside_paths() {
+        let root = temp_dir("toctou");
+        let watched = root.join("Downloads");
+        let outside = root.join("outside");
+        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let inside_file = watched.join("downloaded.bin");
+        fs::write(&inside_file, b"x").unwrap();
+        let outside_file = outside.join("protected.bin");
+        fs::write(&outside_file, b"secret").unwrap();
+
+        let canonical_roots = vec![fs::canonicalize(&watched).unwrap()];
+
+        // A normal file inside the watched dir resolves.
+        let resolved = resolve_inside_watched(&inside_file, &canonical_roots);
+        assert!(resolved.is_some());
+
+        // A file directly outside is rejected.
+        assert!(resolve_inside_watched(&outside_file, &canonical_roots).is_none());
+
+        // A symlink pointing outside resolves to the target and is rejected.
+        let link = watched.join("evil-link.bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        assert!(resolve_inside_watched(&link, &canonical_roots).is_none());
+
+        // A symlink pointing inside stays allowed.
+        let in_link = watched.join("inner-link.bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&inside_file, &in_link).unwrap();
+        assert!(resolve_inside_watched(&in_link, &canonical_roots).is_some());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_handle_watch_event_symlink_cannot_delete_outside_file() {
+        use crate::config::Rule;
+        use crate::quarantine::QuarantineManager;
+        use crate::scanner::Scanner;
+
+        let root = temp_dir("toctou_evt");
+        let watched = root.join("Downloads");
+        let outside = root.join("outside");
+        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        // Both the in-download file and the protected outside file contain the
+        // pattern so a scan of the outside file would match too.
+        let outside_file = outside.join("protected.bin");
+        fs::write(&outside_file, b"MALWARE_SIGNATURE").unwrap();
+
+        let rule = Rule {
+            id: "TOCTOU-TEST".to_string(),
+            name: "TOCTOU Test".to_string(),
+            description: "test".to_string(),
+            severity: "High".to_string(),
+            signatures: crate::config::Signatures {
+                hashes: None,
+                patterns: Some(vec!["MALWARE_SIGNATURE".to_string()]),
+                extension_ids: None,
+            },
+        };
+        let scanner = Scanner::without_yara(vec![rule], 0);
+        let quarantine = QuarantineManager::new(root.join("q")).unwrap();
+        let watched_set: HashSet<PathBuf> = [watched.clone()].into_iter().collect();
+
+        // 1. A normal malicious file inside Downloads is deleted; the outside
+        //    file is untouched.
+        let victim = watched.join("victim.bin");
+        fs::write(&victim, b"MALWARE_SIGNATURE").unwrap();
+        handle_watch_event(
+            notify::Event {
+                kind: EventKind::Create(CreateKind::File),
+                paths: vec![victim.clone()],
+                attrs: EventAttributes::new(),
+            },
+            &scanner,
+            &quarantine,
+            "delete",
+            &watched_set,
+        );
+        assert!(
+            !victim.exists(),
+            "malicious file in Downloads must be deleted"
+        );
+        assert!(outside_file.exists(), "outside file must survive");
+
+        // 2. Replace the path with a symlink to the protected outside file. The
+        //    symlink must be skipped and the outside file must survive.
+        let link = watched.join("victim2.bin");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        handle_watch_event(
+            notify::Event {
+                kind: EventKind::Create(CreateKind::File),
+                paths: vec![link.clone()],
+                attrs: EventAttributes::new(),
+            },
+            &scanner,
+            &quarantine,
+            "delete",
+            &watched_set,
+        );
+        assert!(
+            outside_file.exists(),
+            "symlink target outside Downloads must NOT be deleted"
+        );
+        #[cfg(unix)]
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "the symlink itself should remain (skipped, not unlinked)"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_get_home_dir_for_user_from_resolves_passwd() {
         let root = temp_dir("passwd");
         let home_foo = root.join("users/foo");
@@ -478,10 +665,7 @@ mod tests {
         let passwd = root.join("passwd");
         fs::write(
             &passwd,
-            format!(
-                "foo:x:1000:1000:foo:{}:/bin/bash\n",
-                home_foo.display()
-            ),
+            format!("foo:x:1000:1000:foo:{}:/bin/bash\n", home_foo.display()),
         )
         .unwrap();
 
@@ -504,7 +688,10 @@ mod tests {
         fs::create_dir_all(&download).unwrap();
         fs::write(
             home.join(".config/user-dirs.dirs"),
-            format!("# comment line\nXDG_DOWNLOAD_DIR={}\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\n", download.display()),
+            format!(
+                "# comment line\nXDG_DOWNLOAD_DIR={}\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\n",
+                download.display()
+            ),
         )
         .unwrap();
 

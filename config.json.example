@@ -1,4 +1,6 @@
 {
   "default_action": "quarantine",
-  "downloads_dir": "/home/user/Downloads"
+  "downloads_dir": "/home/user/Downloads",
+  "miner_detection_require_secondary_signal": true,
+  "process_containment": "auto"
 }

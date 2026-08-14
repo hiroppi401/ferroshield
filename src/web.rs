@@ -4,6 +4,7 @@ use crate::scanjob;
 use crate::scanjob::ScanProgress;
 use crate::scanner::Scanner;
 use crate::utils::{get_logs, log_message};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead};
@@ -121,6 +122,91 @@ struct StatusResponse {
     action: String,
 }
 
+const DASHBOARD_TOKEN_FILE: &str = "dashboard.token";
+const TOKEN_PLACEHOLDER: &str = "__FERROSHIELD_TOKEN__";
+
+/// Loads the dashboard token from disk or generates a fresh 64-hex-char token
+/// (32 random bytes) persisted with 0600 permissions. The token is required in
+/// the `Authorization: Bearer <token>` header of every `/api/*` request so that
+/// local non-browser processes cannot drive destructive actions (scan + delete,
+/// quarantine, whitelist, network block) against the root daemon.
+fn load_or_create_dashboard_token() -> String {
+    load_or_create_dashboard_token_at(Path::new(DASHBOARD_TOKEN_FILE))
+}
+
+/// Loads the dashboard token from `path` or generates a fresh 64-hex-char token
+/// (32 random bytes) persisted with 0600 permissions. The token is required in
+/// the `Authorization: Bearer <token>` header of every `/api/*` request so that
+/// local non-browser processes cannot drive destructive actions (scan + delete,
+/// quarantine, whitelist, network block) against the root daemon.
+fn load_or_create_dashboard_token_at<P: AsRef<Path>>(path: P) -> String {
+    let path = path.as_ref();
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        let existing = existing.trim().to_string();
+        if existing.len() == 64 && existing.chars().all(|c| c.is_ascii_hexdigit()) {
+            return existing;
+        }
+    }
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    if std::fs::write(path, &token).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::metadata(path).map(|m| {
+            let mut perms = m.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)
+        });
+    } else {
+        eprintln!("[-] Gagal menulis file token dashboard: {}", path.display());
+    }
+    token
+}
+
+/// True when the request carries a valid `Authorization: Bearer <token>` header.
+fn is_authorized(request: &tiny_http::Request, token: &str) -> bool {
+    let expected = format!("Bearer {}", token);
+    request.headers().iter().any(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("authorization")
+            && h.value.as_str().trim().eq_ignore_ascii_case(&expected)
+    })
+}
+
+fn json_response(status: u16, body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string(body.to_string())
+        .with_status_code(StatusCode(status))
+        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+}
+
+/// Applies the request guards for every request. Returns `Some(response)` when
+/// the request must be rejected, `None` when it may proceed. This is the single
+/// enforcement point exercised by the auth integration tests.
+fn enforce_request_guards(
+    request: &tiny_http::Request,
+    method: &Method,
+    token: &str,
+) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+    if !is_allowed_host(request) {
+        return Some(json_response(403, "{\"error\": \"Forbidden\"}"));
+    }
+    if method == &Method::Post && !is_same_site(request) {
+        return Some(json_response(
+            403,
+            "{\"error\": \"Cross-site request rejected\"}",
+        ));
+    }
+    if request.url().starts_with("/api/") && !is_authorized(request, token) {
+        return Some(json_response(401, "{\"error\": \"Unauthorized\"}"));
+    }
+    None
+}
+
 /// Starts the built-in HTTP server serving Web UI and API
 pub fn start_web_server(
     host: &str,
@@ -215,6 +301,16 @@ pub fn start_web_server(
         }
     };
 
+    // Dashboard auth token. Required as `Authorization: Bearer <token>` on every
+    // /api/* request (see `enforce_request_guards`); it is injected into the
+    // served index.html so the browser works without manual entry. The token
+    // file is written with 0600 permissions so only the daemon user can read it.
+    let dashboard_token = load_or_create_dashboard_token();
+    log_message(&format!(
+        "[+] Token dashboard aktif. Berkas token: {} (0600). Semua endpoint /api/* memerlukan header Authorization: Bearer <token>.",
+        DASHBOARD_TOKEN_FILE
+    ));
+
     // Check if there is an interrupted scan state to resume
     let state_path = scanjob::state_path(&quarantine_mgr.quarantine_dir);
 
@@ -302,36 +398,24 @@ pub fn start_web_server(
             let method = request.method().clone();
             let url = request.url().to_string();
 
-            // Localhost-only access guard: reject foreign Host headers (DNS rebinding)
-            // and cross-site state-changing requests (CSRF from malicious websites).
-            if !is_allowed_host(&request) {
-                let response = Response::from_string("{\"error\": \"Forbidden\"}")
-                    .with_status_code(StatusCode(403))
-                    .with_header(
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                    );
-                let _ = request.respond(response);
-                continue;
-            }
-
-            if method == Method::Post && !is_same_site(&request) {
-                let response =
-                    Response::from_string("{\"error\": \"Cross-site request rejected\"}")
-                        .with_status_code(StatusCode(403))
-                        .with_header(
-                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                                .unwrap(),
-                        );
-                let _ = request.respond(response);
+            // Localhost-only access guard: reject foreign Host headers (DNS rebinding),
+            // cross-site state-changing requests (CSRF from malicious websites), and any
+            // /api/* request that lacks the dashboard bearer token (local non-browser
+            // processes, e.g. curl, do not send Origin/Sec-Fetch-Site by default).
+            if let Some(rejected) = enforce_request_guards(&request, &method, &dashboard_token) {
+                let _ = request.respond(rejected);
                 continue;
             }
 
             let response = match handle_request(
                 &mut request,
-                &scanner,
-                &quarantine_mgr,
-                &rules_config,
-                &default_action,
+                &WebContext {
+                    scanner: &scanner,
+                    quarantine_mgr: &quarantine_mgr,
+                    rules_config: &rules_config,
+                    default_action: &default_action,
+                    dashboard_token: &dashboard_token,
+                },
                 &method,
                 &url,
             ) {
@@ -364,12 +448,19 @@ pub fn start_web_server(
     });
 }
 
+/// Shared references needed by `handle_request`, grouped so the function keeps a
+/// manageable argument list.
+struct WebContext<'a> {
+    scanner: &'a Scanner,
+    quarantine_mgr: &'a QuarantineManager,
+    rules_config: &'a RulesConfig,
+    default_action: &'a str,
+    dashboard_token: &'a str,
+}
+
 fn handle_request(
     request: &mut tiny_http::Request,
-    scanner: &Scanner,
-    quarantine_mgr: &QuarantineManager,
-    rules_config: &RulesConfig,
-    default_action: &str,
+    ctx: &WebContext<'_>,
     method: &Method,
     url: &str,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>, String> {
@@ -380,7 +471,8 @@ fn handle_request(
 
     // Serve Frontend
     if (method == &Method::Get) && (url == "/" || url == "/index.html" || url == "/index") {
-        let html_content = include_str!("../web/index.html");
+        let html_content =
+            include_str!("../web/index.html").replace(TOKEN_PLACEHOLDER, ctx.dashboard_token);
         return Ok(Response::from_string(html_content)
             .with_status_code(StatusCode(200))
             .with_header(html_header));
@@ -397,17 +489,18 @@ fn handle_request(
     // Serve APIs
     match (method, url) {
         (&Method::Get, "/api/status") => {
-            let q_count = quarantine_mgr
+            let q_count = ctx
+                .quarantine_mgr
                 .list_quarantined()
                 .map(|l| l.len())
                 .unwrap_or(0);
 
             let res = StatusResponse {
                 status: "active".to_string(),
-                rules_count: rules_config.rules.len(),
+                rules_count: ctx.rules_config.rules.len(),
                 quarantine_count: q_count,
                 log_count: get_logs().len(),
-                action: default_action.to_string(),
+                action: ctx.default_action.to_string(),
             };
             let body = serde_json::to_string(&res).map_err(|e| e.to_string())?;
             Ok(Response::from_string(body)
@@ -415,7 +508,8 @@ fn handle_request(
                 .with_header(json_header))
         }
         (&Method::Get, "/api/quarantine") => {
-            let list = quarantine_mgr
+            let list = ctx
+                .quarantine_mgr
                 .list_quarantined()
                 .map_err(|e| e.to_string())?;
             let body = serde_json::to_string(&list).map_err(|e| e.to_string())?;
@@ -497,7 +591,7 @@ fn handle_request(
             }
 
             // Clean stale state before starting a fresh CLI scan process
-            let quarantine_dir = quarantine_mgr.quarantine_dir.clone();
+            let quarantine_dir = ctx.quarantine_mgr.quarantine_dir.clone();
             if !is_resume {
                 let _ = fs::remove_file(scanjob::state_path(&quarantine_dir));
             }
@@ -507,7 +601,7 @@ fn handle_request(
             let generation = SCAN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
             terminate_scan_child();
             start_scan_process(
-                quarantine_mgr,
+                ctx.quarantine_mgr,
                 &target_path,
                 req.delete,
                 is_resume,
@@ -547,12 +641,15 @@ fn handle_request(
                 );
             }
 
-            let (sha256, _) = scanner.calculate_hashes(path).map_err(|e| e.to_string())?;
+            let (sha256, _) = ctx
+                .scanner
+                .calculate_hashes(path)
+                .map_err(|e| e.to_string())?;
             let rule_id = req
                 .rule_id
                 .unwrap_or_else(|| "HEURISTIC-ENTROPY".to_string());
 
-            quarantine_mgr
+            ctx.quarantine_mgr
                 .quarantine_file(path, &sha256, &rule_id)
                 .map_err(|e| e.to_string())?;
             log_message(&format!(
@@ -567,7 +664,7 @@ fn handle_request(
             }
 
             // Perbarui state di disk
-            let state_path = scanjob::state_path(&quarantine_mgr.quarantine_dir);
+            let state_path = scanjob::state_path(&ctx.quarantine_mgr.quarantine_dir);
             if let Some(mut state) = scanjob::load_scan_state(&state_path) {
                 state.results.retain(|r| r.file_path != req.path);
                 state.threats_found = state.results.len();
@@ -606,7 +703,7 @@ fn handle_request(
             }
 
             // Perbarui state di disk
-            let state_path = scanjob::state_path(&quarantine_mgr.quarantine_dir);
+            let state_path = scanjob::state_path(&ctx.quarantine_mgr.quarantine_dir);
             if let Some(mut state) = scanjob::load_scan_state(&state_path) {
                 state.results.retain(|r| r.file_path != req.path);
                 state.threats_found = state.results.len();
@@ -650,7 +747,7 @@ fn handle_request(
             }
 
             // Perbarui state di disk
-            let state_path = scanjob::state_path(&quarantine_mgr.quarantine_dir);
+            let state_path = scanjob::state_path(&ctx.quarantine_mgr.quarantine_dir);
             if let Some(mut state) = scanjob::load_scan_state(&state_path) {
                 state.results.retain(|r| r.file_path != req.path);
                 state.threats_found = state.results.len();
@@ -676,7 +773,7 @@ fn handle_request(
             SCAN_STATUS.store(3, Ordering::SeqCst); // 3: Paused
 
             // Instruct the CLI scan process to pause
-            let quarantine_dir = quarantine_mgr.quarantine_dir.clone();
+            let quarantine_dir = ctx.quarantine_mgr.quarantine_dir.clone();
             scanjob::write_control(&scanjob::control_path(&quarantine_dir), "pause");
 
             // Save state to disk
@@ -705,7 +802,7 @@ fn handle_request(
             SCAN_STATUS.store(2, Ordering::SeqCst); // 2: Scanning
 
             // Instruct the CLI scan process to resume
-            let quarantine_dir = quarantine_mgr.quarantine_dir.clone();
+            let quarantine_dir = ctx.quarantine_mgr.quarantine_dir.clone();
             scanjob::write_control(&scanjob::control_path(&quarantine_dir), "resume");
 
             // Save state to disk
@@ -740,7 +837,7 @@ fn handle_request(
             // Instruct the CLI scan process to stop. It exits gracefully (saving
             // accurate progress so a later resume continues from the right file),
             // but force-kill it if it does not exit promptly.
-            let quarantine_dir = quarantine_mgr.quarantine_dir.clone();
+            let quarantine_dir = ctx.quarantine_mgr.quarantine_dir.clone();
             scanjob::write_control(&scanjob::control_path(&quarantine_dir), "stop");
 
             // Save state to disk
@@ -774,7 +871,7 @@ fn handle_request(
             }
 
             // Delete state/control files from disk
-            let quarantine_dir = quarantine_mgr.quarantine_dir.clone();
+            let quarantine_dir = ctx.quarantine_mgr.quarantine_dir.clone();
             scanjob::clear_control(&scanjob::control_path(&quarantine_dir));
             let _ = fs::remove_file(scanjob::state_path(&quarantine_dir));
             let _ = fs::remove_file(scanjob::scan_pid_path(&quarantine_dir));
@@ -797,7 +894,7 @@ fn handle_request(
             if url.starts_with("/api/quarantine/restore") && method == &Method::Post {
                 let id =
                     get_query_param(url, "id").ok_or_else(|| "Missing id parameter".to_string())?;
-                quarantine_mgr
+                ctx.quarantine_mgr
                     .restore_file(&id)
                     .map_err(|e| e.to_string())?;
                 log_message(&format!(
@@ -812,10 +909,12 @@ fn handle_request(
             if url.starts_with("/api/quarantine/delete") && method == &Method::Post {
                 let id =
                     get_query_param(url, "id").ok_or_else(|| "Missing id parameter".to_string())?;
-                let q_file = quarantine_mgr
+                let q_file = ctx
+                    .quarantine_mgr
                     .quarantine_dir
                     .join(format!("{}.quarantined", id));
-                let m_file = quarantine_mgr
+                let m_file = ctx
+                    .quarantine_mgr
                     .quarantine_dir
                     .join(format!("{}.metadata", id));
                 if q_file.exists() && m_file.exists() {
@@ -970,6 +1069,117 @@ fn is_same_site(request: &tiny_http::Request) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST_TOKEN: &str = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+
+    fn raw_http_status(addr: &str, raw: &str) -> u16 {
+        let mut stream = TcpStream::connect(addr).expect("connect to test server");
+        stream.write_all(raw.as_bytes()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let n = stream.read(&mut buf).unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        head.lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_api_requests_without_token_are_rejected() {
+        // Simulates curl-style requests: no Origin and no Sec-Fetch-Site headers,
+        // which previously sailed through the CSRF checks (None => allowed).
+        let server = Server::http("127.0.0.1:0").expect("bind test server");
+        let addr = server.server_addr().to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..4 {
+                if let Ok(request) = server.recv() {
+                    let method = request.method().clone();
+                    let response = match enforce_request_guards(&request, &method, TEST_TOKEN) {
+                        Some(rejected) => rejected,
+                        None => json_response(200, "{\"ok\": true}"),
+                    };
+                    let _ = request.respond(response);
+                }
+            }
+        });
+
+        // 1. No token at all -> 401 (was 200 before the fix)
+        let status = raw_http_status(
+            &addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(status, 401, "tokenless /api request must be rejected");
+
+        // 2. Wrong token -> 401
+        let status = raw_http_status(
+            &addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer wrong\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(status, 401, "wrong token must be rejected");
+
+        // 3. Correct token, still no Origin/Sec-Fetch-Site -> allowed
+        let with_token = format!(
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+            TEST_TOKEN
+        );
+        assert_eq!(raw_http_status(&addr, &with_token), 200);
+
+        // 4. Non-API paths (the dashboard page itself) remain accessible
+        let status = raw_http_status(
+            &addr,
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(status, 200);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_token_file_is_created_with_0600_perms() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroshield_token_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.token");
+
+        let token = load_or_create_dashboard_token_at(&path);
+        assert_eq!(token.len(), 64);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be 0600");
+
+        // Re-loading reuses the same token (stable across restarts).
+        let reloaded = load_or_create_dashboard_token_at(&path);
+        assert_eq!(reloaded, token);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_index_html_token_injection() {
+        let html = "abc __FERROSHIELD_TOKEN__ def";
+        assert_eq!(
+            html.replace(TOKEN_PLACEHOLDER, TEST_TOKEN),
+            format!("abc {} def", TEST_TOKEN)
+        );
+    }
 
     #[test]
     fn test_host_allowed() {

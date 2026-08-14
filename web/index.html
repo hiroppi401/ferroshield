@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- The server replaces this placeholder with the per-install dashboard token
+         used to authorize every /api/* call (see authFetch below). -->
+    <meta name="ferroshield-token" content="__FERROSHIELD_TOKEN__">
     <title>FerroShield | Security Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <!-- Modern typography -->
@@ -829,9 +832,21 @@
     <div id="toast-container"></div>
 
     <script>
-        // Localhost-only dashboard: no authentication token is used. The server
-        // rejects foreign Host headers and cross-site requests.
-        const authFetch = (url, options = {}) => fetch(url, options);
+        // The server injects the per-install dashboard token into this page
+        // (meta[name="ferroshield-token"]). Every /api/* request must carry it
+        // as `Authorization: Bearer <token>`; tokenless requests are rejected
+        // with 401, blocking local non-browser processes (e.g. curl) from
+        // driving destructive actions against the root daemon.
+        const AUTH_TOKEN =
+            document.querySelector('meta[name="ferroshield-token"]')?.content || '';
+        const authFetch = (url, options = {}) => {
+            const opts = { ...options };
+            opts.headers = {
+                ...(opts.headers || {}),
+                'Authorization': 'Bearer ' + AUTH_TOKEN
+            };
+            return fetch(url, opts);
+        };
 
         // --- Threat notifications (toast + browser notification) ---
         let notifEnabled = false;

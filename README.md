@@ -18,7 +18,7 @@
 
 - **Pemindai Multilapis & Resumable Scanner**:
   - **Pencocokan Hash & Fuzzy Hash**: Memindai berdasarkan hash MD5, SHA-256, serta **TLSH** (Locality Sensitive Hashing) untuk mengenali varian malware bermutasi (skor perbedaan ≤ 50).
-  - **Aturan YARA-X & Regex**: Integrasi mesin YARA-X modern (`rules.yar`) dan regex pattern matching. Paket resmi menyertakan ruleset komunitas **12.460 aturan** (lihat [Ruleset YARA](#ruleset-yara-rulesyar)).
+  - **Aturan YARA-X & Regex**: Integrasi mesin YARA-X modern (`rules.yar`) dan regex pattern matching. Paket resmi menyertakan ruleset komunitas **12.419 aturan** (lihat [Ruleset YARA](#ruleset-yara-rulesyar)).
   - **Deteksi Heuristik Entropi**: Mendeteksi file eksekusi (ELF & PE) ber-entropi tinggi (> 7.5) yang dikemas (*packed*) atau dienkripsi malware, dengan filter cerdas pada artefak build/kompiler.
   - **Resumable Scan**: Pemindaian direktori dapat **dijeda, dihentikan, dan dilanjutkan** (*scan_state.json*) tanpa mengulang dari awal.
   - **Pengecualian Whitelist**: Mendukung *whitelist* kustom (`whitelist.json`) dengan *caching* otomatis berdasarkan waktu modifikasi berkas.
@@ -28,7 +28,7 @@
 - **Crypto-Miner & Network Guard (Kernel eBPF + Procfs)**:
   - Memantau koneksi TCP outbound aktif dan deteksi port pertambangan kripto (3333, 4444, 5555, 7777, 8888, 14444).
   - **Kernel-Space eBPF**: Melacak panggilan sistem `sys_enter_connect` dan UProbe DNS `getaddrinfo` langsung di level kernel menggunakan pustaka `aya`.
-  - **Tindakan Defensif Anti-Watchdog**: Isolasi/karantina/penghapusan biner eksekusi terlebih dahulu, pemblokiran IP via `iptables`, dan dilanjutkan penghentian sinyal sinyal `kill -9 PID` (mencegah malware twin/watchdog melakukan re-eksekusi biner dari disk). Jug mendeteksi proses mencurigakan yang berjalan dari folder temporer (`/tmp/`, `/var/tmp/`, `/dev/shm/`, `/run/user/`).
+  - **Tindakan Defensif Anti-Mutasi & Anti-Watchdog (Freeze-First)**: Proses terdeteksi **dibekukan dulu** bersama seluruh keturunannya (*cgroup v2 freezer*, fallback `SIGSTOP`) sehingga tak bisa mengeksekusi kode/membuat file baru, kemudian biner eksekusi dikarantina/dihapus, IP diblokir via `iptables`/`nftables`, dan terakhir proses dibunuh dengan `kill -9` (mencegah malware twin/watchdog melakukan re-eksekusi biner dari disk ataupun bermutasi). Juga mendeteksi proses mencurigakan yang berjalan dari folder temporer (`/tmp/`, `/var/tmp/`, `/dev/shm/`, `/run/user/`).
 - **Karantina Kriptografis (AES-256-GCM & HMAC)**:
   - Mengenkripsi berkas berbahaya dengan AES-256-GCM menggunakan *file key* dan *nonce* unik.
   - Memverifikasi integritas berkas terisolasi menggunakan HMAC-SHA256.
@@ -36,7 +36,7 @@
   - Menyimpan dan memulihkan izin hak akses asli (*file permissions*) saat proses *restore*.
 - **Keamanan & Pengerasan Layanan (Hardening)**:
   - **Capability Dropping**: Menurunkan hak akses *root* yang tidak diperlukan dan hanya mempertahankan kapabilitas esensial (`CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_KILL`, `CAP_DAC_OVERRIDE`).
-  - **Web UI Lokal yang Aman**: Dashboard terikat ke `127.0.0.1` dan memverifikasi header `Host` serta menolak permintaan lintas-situs (`Origin`/`Sec-Fetch-Site`), sehingga tidak memerlukan token dan aman dari serangan CSRF/DNS rebinding.
+  - **Web UI Lokal yang Aman**: Dashboard terikat ke `127.0.0.1`, memvalidasi header `Host`, menolak permintaan lintas-situs (`Origin`/`Sec-Fetch-Site`), **dan mewajibkan token akses** (di file `dashboard.token` mode `0600`) pada semua endpoint `/api/*` — sehingga proses lokal non-browser (mis. `curl`) tidak bisa memicu aksi destruktif terhadap daemon root.
   - **Firewall Nftables & Iptables**: Pemblokiran IP otomatis mendukung **nftables** (preferensi) maupun **iptables**, agar berfungsi di semua distribusi Linux.
   - **Integritas Aturan Ed25519**: Verifikasi tanda tangan `rules.json.sig` memakai kunci publik bawaan atau file `rules.pub`, sebelum memuat basis aturan.
   - **Pembaruan Threat Feed**: Perintah otomatis untuk mengunduh daftar hitam IP Feodo Tracker dan domain URLhaus, menggabungkan, serta menandatangani ulang `rules.json`.
@@ -97,20 +97,21 @@ graph TD
     B --> D{Koneksi / DNS ke IP/Domain Blacklist atau Port Stratum Mining?}
     C --> D
     D -->|Ya| E[Dapatkan PID & Path Biner Proses]
-    E --> F{default_action?}
-    F -->|delete| G[1. Hapus Biner Eksekusi dari Disk]
-    F -->|quarantine| H[1. Karantina Biner via AES-256-GCM]
-    G --> I[2. Blokir IP di Firewall via iptables drop]
-    H --> I
-    I --> J[3. Hentikan Proses: kill -9 PID]
-    D -->|Tidak| K[Tidur & Lanjutkan Pemantauan]
+    E --> F[0. Freeze Pohon Proses: cgroup v2 freezer / fallback SIGSTOP]
+    F --> G{default_action?}
+    G -->|delete| H[1. Hapus Biner Eksekusi dari Disk]
+    G -->|quarantine| I[1. Karantina Biner via AES-256-GCM]
+    H --> J[2. Blokir IP di Firewall via iptables/nftables drop]
+    I --> J
+    J --> K[3. SIGKILL Proses yang Masih Beku + Bersihkan cgroup]
+    D -->|Tidak| L[Tidur & Lanjutkan Pemantauan]
 ```
 
 ---
 
 ## ⚙️ Konfigurasi Basis Aturan (`rules.json`)
 
-Seluruh database sidik jari malware, ID ekstensi, dan blacklist jaringan diatur dalam berkas `rules.json` yang dilindungi tanda tangan digital Ed25519 (`rules.json.sig`). **Pengaturan runtime** (`default_action`, `downloads_dir`) dipisahkan ke `config.json` (tidak ditandatangani) sehingga dapat diubah tanpa menandatangani ulang:
+Seluruh database sidik jari malware, ID ekstensi, dan blacklist jaringan diatur dalam berkas `rules.json` yang dilindungi tanda tangan digital Ed25519 (`rules.json.sig`). **Pengaturan runtime** (`default_action`, `downloads_dir`, `process_containment`) dipisahkan ke `config.json` (tidak ditandatangani) sehingga dapat diubah tanpa menandatangani ulang:
 
 ```json
 {
@@ -146,10 +147,10 @@ Seluruh database sidik jari malware, ID ekstensi, dan blacklist jaringan diatur 
 ```
 
 ### Ruleset YARA (`rules.yar`)
-Selain `rules.json`, pemindai juga memuat ruleset YARA-X dari berkas **`rules.yar`** (dibaca dari direktori kerja saat biner dijalankan). Paket resmi menyertakan **12.460 aturan** dari proyek komunitas [Yara-Rules/rules](https://github.com/Yara-Rules/rules) (commit `0f93570`, lisensi **GPL-2.0**) untuk kategori malware, APT, webshell, packer, exploit kit, dokumen berbahaya, email phishing, dan CVE.
+Selain `rules.json`, pemindai juga memuat ruleset YARA-X dari berkas **`rules.yar`** (dibaca dari direktori kerja saat biner dijalankan). Paket resmi menyertakan **12.419 aturan** dari proyek komunitas [Yara-Rules/rules](https://github.com/Yara-Rules/rules) (commit `0f93570`, lisensi **GPL-2.0**) untuk kategori malware, APT, webshell, packer, exploit kit, dokumen berbahaya, email phishing, dan CVE.
 
 Hal yang perlu diperhatikan:
-- Berkas `rules.yar` **tidak ditandatangani** (berbeda dengan `rules.json` yang dilindungi Ed25519) — lindungi integritasnya sebagai file sistem.
+- Integritas `rules.yar` dilindungi oleh **hash SHA-256** (`rules_yar_sha256`) yang dicatat di dalam `rules.json` yang ditandatangani Ed25519 — mengubah 1 rule pun akan menonaktifkan YARA dengan peringatan jelas saat daemon dijalankan.
 - `rules.yar`, `rules.json`, dan `*.sig` otomatis **dilewati** saat pemindaian direktori agar ruleset tidak men-flag dirinya sendiri (memuat string payload asli sebagai signature).
 - Beberapa rule komunitas bersifat *broad* dan dapat memicu **false positive** (mis. `IsSuspicious` pada arsip `.a`). Pengecualian diatur lewat `whitelist.json`.
 - Prosedur pembaruan, verifikasi kompilasi, dan penanganan masalah untuk teknisi: lihat [TEKNISI.md](file:///media/D/projek/pribadi/ferroshield/TEKNISI.md).
@@ -256,16 +257,18 @@ Pengaturan runtime dimuat dari `$FERROSHIELD_CONFIG`, `./config.json`, atau `/et
 ```json
 {
   "default_action": "quarantine",
-  "downloads_dir": "/home/user/Downloads"
+  "downloads_dir": "/home/user/Downloads",
+  "miner_detection_require_secondary_signal": true
 }
 ```
 `downloads_dir` dapat diisi `null` agar daemon mendeteksi folder unduhan seluruh pengguna secara otomatis.
+`miner_detection_require_secondary_signal` (default `true`): saat aktif, koneksi ke port mining (3333, 4444, 5555, 7777, 8888, 14444) hanya diberi alert kecuali ada sinyal kedua (IP di blacklist `rules.json` atau biner berjalan dari direktori temp seperti `/tmp`, `/dev/shm`). Set ke `false` untuk mengembalikan perilaku lama (langsung bertindak hanya dari port).
 
 ---
 
 ## 🖥️ Web UI Dashboard
 
-Setelah daemon monitor atau web mode berjalan, buka peramban Anda dan akses **`http://127.0.0.1:8686`** — **tanpa token**. Dashboard terikat ke `127.0.0.1`, memvalidasi header `Host`, dan menolak permintaan lintas-situs (CSRF/DNS-rebinding), sehingga aman diakses langsung tanpa autentikasi. Dashboard interaktif menyediakan:
+Setelah daemon monitor atau web mode berjalan, buka peramban Anda dan akses **`http://127.0.0.1:8686`**. Dashboard dilindungi **token akses**: token dibuat otomatis saat startup, disimpan di `dashboard.token` (mode `0600`), dan disuntikkan ke halaman dashboard sehingga browser bekerja tanpa konfigurasi. Semua endpoint `/api/*` menolak permintaan tanpa `Authorization: Bearer <token>` (HTTP 401), melindungi daemon root dari proses lokal non-browser. Header `Host`/`Origin`/`Sec-Fetch-Site` tetap divalidasi sebagai lapisan tambahan (CSRF/DNS-rebinding). Dashboard interaktif menyediakan:
 
 1. **Overview**: Metrik jumlah aturan, file dikarantina, status sistem, dan **Real-Time Audit Terminal Logs**.
 2. **Scanner**: Tab interaktif untuk memasukkan path folder, mengontrol jalannya scan (start, pause, resume, stop), memantau progress persentase, dan melihat hasil ancaman.

@@ -568,5 +568,7 @@
       "scrroeder.com",
       "celebratingseniors.net"
     ]
-  }
+  },
+  "ebpf_sha256": "af431599029b420ad942464970b814d029ace9c2cd7b6ff4b24887291c098f54",
+  "rules_yar_sha256": "8a172c4f13d1ed84b974f0e3228070ab64bfdf542120b7eee155fc91b7709c8a"
 }

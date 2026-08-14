@@ -192,9 +192,9 @@ write_config() {
         ok "config.json sudah ada, melewati pembuatan."
         return 0
     fi
-    printf '{\n  "default_action": "quarantine",\n  "downloads_dir": null\n}\n' > "$CONF_DIR/config.json"
+    printf '{\n  "default_action": "quarantine",\n  "downloads_dir": null,\n  "miner_detection_require_secondary_signal": true,\n  "process_containment": "auto"\n}\n' > "$CONF_DIR/config.json"
     chmod 0600 "$CONF_DIR/config.json"
-    ok "config.json dibuat (default_action=quarantine)."
+    ok "config.json dibuat (default_action=quarantine, miner secondary signal aktif, process_containment=auto)."
 }
 
 # --- Service installation --------------------------------------------------

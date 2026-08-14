@@ -12,6 +12,7 @@ ferroshield.log
 *.pid
 dashboard.crt
 dashboard.key
+dashboard.token
 
 # Local data
 .quarantine/

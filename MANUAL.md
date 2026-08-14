@@ -67,8 +67,24 @@ Semua tanda tangan malware, daftar hitam IP, domain pool pertambangan, dan penga
 ```
 
 ### Opsi Tindakan Karantina (`default_action`)
-1.  `"quarantine"`: Mengenkripsi file terinfeksi menggunakan XOR dan memindahkannya ke folder karantina terisolasi.
+1.  `"quarantine"`: Mengenkripsi file terinfeksi menggunakan **AES-256-GCM** (dengan verifikasi integritas **HMAC-SHA256**) dan memindahkannya ke folder karantina terisolasi.
 2.  `"delete"`: Menghapus file berbahaya secara instan dari disk secara permanen.
+
+### Konfigurasi Runtime (`config.json`)
+Pengaturan runtime tidak ditandatangani dan dibaca dari `config.json` (atau `$FERROSHIELD_CONFIG` / `/etc/ferroshield/config.json`):
+
+```json
+{
+  "default_action": "quarantine",
+  "downloads_dir": "/home/user/Downloads",
+  "miner_detection_require_secondary_signal": true,
+  "process_containment": "auto"
+}
+```
+
+| Kunci | Nilai | Keterangan |
+|---|---|---|
+| `process_containment` | `auto` (default), `cgroup`, `sigstop`, `off` | Strategi **freeze-first anti-mutasi**: proses berbahaya dibekukan dulu (cgroup v2 freezer, fallback `SIGSTOP`) sebelum binary dinetralkan & dibunuh, sehingga malware tak bisa bermutasi/membuat file baru saat dibunuh. `off` = perilaku lama (langsung `kill -9`). |
 
 ---
 
@@ -89,6 +105,8 @@ Menjalankan program pemantauan real-time untuk jaringan, browser guard, ekstensi
 ```bash
 sudo ./target/release/ferroshield monitor
 ```
+
+> **Anti-mutasi (freeze-first):** setiap proses yang terdeteksi (IP blacklist, path temp mencurigakan, port mining, heuristik CPU, atau event eBPF) **dibekukan terlebih dahulu** bersama seluruh keturunannya (cgroup v2 freezer, fallback SIGSTOP), lalu binary-nya dikarantina/dihapus, IP diblokir, dan proses dibunuh. Karena proses beku tidak bisa mengeksekusi kode, malware **tidak dapat bermutasi/membuat file baru** saat dibunuh. Lihat `process_containment` di §2.
 
 ### C. Menjalankan Web UI Dashboard Saja
 Menjalankan konsol web interaktif tanpa thread monitoring aktif di latar belakang:
@@ -153,6 +171,12 @@ Untuk memastikan FerroShield memproteksi komputer Anda secara terus-menerus di l
 
 Setelah daemon monitor atau web mode berjalan, buka peramban web Anda dan akses:
 👉 **`http://localhost:8686`**
+
+Dashboard dilindungi **token akses** (berlaku untuk semua endpoint `/api/*`):
+- Token dibuat otomatis saat daemon pertama kali berjalan dan disimpan di file **`dashboard.token`** (mode `0600`, hanya dapat dibaca oleh user daemon) di direktori kerja (`/etc/ferroshield/dashboard.token` pada instalasi systemd).
+- Browser Anda memuat token langsung dari halaman dashboard, jadi **tidak perlu menyalin token secara manual** untuk pemakaian normal.
+- Permintaan API tanpa token (mis. `curl` biasa) akan ditolak dengan HTTP `401`. Token harus dikirim sebagai header `Authorization: Bearer <token>`.
+- Header `Host`, `Origin`, dan `Sec-Fetch-Site` tetap divalidasi sebagai lapisan tambahan (anti-CSRF/DNS-rebinding).
 
 Di Web UI, Anda dapat melakukan operasi berikut secara visual:
 1.  **Dashboard Overview**: Melihat status proteksi, jumlah aturan, total file karantina, dan **Real-time Audit Logs terminal** yang interaktif.
