@@ -1,0 +1,353 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+pub const RULES_PUBLIC_KEY: &str =
+    "c9c3a749405430b178ce968485a3a335c02b67cc28ee7dbccc4f32c853a313e5";
+
+/// Runtime (unsigned) settings kept separate from the signature-protected
+/// threat rules, so changing them does not require re-signing rules.json.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct RuntimeConfig {
+    pub default_action: Option<String>, // "quarantine" or "delete"
+    pub downloads_dir: Option<String>,
+}
+
+/// Locates and loads the runtime config, preferring in order:
+/// $FERROSHIELD_CONFIG, ./config.json, /etc/ferroshield/config.json,
+/// then legacy rules.json "settings" (development fallback).
+pub fn load_runtime_config() -> RuntimeConfig {
+    let candidates = std::env::var("FERROSHIELD_CONFIG")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain([
+            PathBuf::from("config.json"),
+            PathBuf::from("/etc/ferroshield/config.json"),
+        ]);
+
+    let mut cfg = RuntimeConfig::default();
+    for path in candidates {
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(parsed) = serde_json::from_str::<RuntimeConfig>(&content)
+        {
+            cfg = parsed;
+            break;
+        }
+    }
+    cfg
+}
+
+/// Returns the effective default action, falling back to legacy rules.json settings.
+pub fn effective_default_action(runtime: &RuntimeConfig, rules: &RulesConfig) -> String {
+    if let Some(action) = &runtime.default_action {
+        return action.clone();
+    }
+    rules
+        .settings
+        .as_ref()
+        .and_then(|s| s.default_action.clone())
+        .unwrap_or_else(|| "quarantine".to_string())
+}
+
+/// Returns the effective downloads dir, falling back to legacy rules.json settings.
+pub fn effective_downloads_dir(runtime: &RuntimeConfig, rules: &RulesConfig) -> Option<String> {
+    if runtime.downloads_dir.is_some() {
+        runtime.downloads_dir.clone()
+    } else {
+        rules
+            .settings
+            .as_ref()
+            .and_then(|s| s.downloads_dir.clone())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Hashes {
+    pub sha256: Option<String>,
+    pub md5: Option<String>,
+    pub tlsh: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Signatures {
+    pub hashes: Option<Hashes>,
+    pub patterns: Option<Vec<String>>,
+    pub extension_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Rule {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub severity: String,
+    pub signatures: Signatures,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Settings {
+    pub default_action: Option<String>, // "quarantine" or "delete"
+    pub web_token: Option<String>,
+    pub downloads_dir: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NetworkBlacklist {
+    pub ips: Vec<String>,
+    pub domains: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RulesConfig {
+    pub settings: Option<Settings>,
+    pub rules: Vec<Rule>,
+    pub network_blacklist: NetworkBlacklist,
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        })
+        .collect()
+}
+
+/// Loads the Ed25519 public key, preferring a `rules.pub` file next to the rules
+/// file or in /etc/ferroshield, and falling back to the compiled-in key.
+fn load_public_key(rules_path: &Path) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
+    let mut candidates = Vec::new();
+    let dir = rules_path.parent().unwrap_or_else(|| Path::new("."));
+    candidates.push(dir.join("rules.pub"));
+    candidates.push(PathBuf::from("/etc/ferroshield/rules.pub"));
+
+    for candidate in candidates {
+        if candidate.exists()
+            && let Ok(content) = std::fs::read_to_string(&candidate)
+        {
+            let hex = content.trim();
+            if let Ok(bytes) = decode_hex(hex)
+                && bytes.len() == 32
+            {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                return VerifyingKey::from_bytes(&arr)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
+            }
+        }
+    }
+
+    let pub_key_bytes = decode_hex(RULES_PUBLIC_KEY)?;
+    let mut pub_key_arr = [0u8; 32];
+    pub_key_arr.copy_from_slice(&pub_key_bytes);
+    VerifyingKey::from_bytes(&pub_key_arr).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+}
+
+/// Generates a fresh Ed25519 keypair and writes rules.key (private, 0400)
+/// and rules.pub (public, 0400) into the given directory.
+pub fn gen_rules_keypair<P: AsRef<Path>>(
+    dir: P,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    use rand::RngCore;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let verifying_key = signing_key.verifying_key();
+
+    let key_path = dir.join("rules.key");
+    let pub_path = dir.join("rules.pub");
+    std::fs::write(&key_path, secret)?;
+    std::fs::write(&pub_path, hex_encode(&verifying_key.to_bytes()))?;
+
+    let mut key_perms = std::fs::metadata(&key_path)?.permissions();
+    key_perms.set_mode(0o400);
+    std::fs::set_permissions(&key_path, key_perms)?;
+    let mut pub_perms = std::fs::metadata(&pub_path)?.permissions();
+    pub_perms.set_mode(0o400);
+    std::fs::set_permissions(&pub_path, pub_perms)?;
+
+    Ok((key_path, pub_path))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+pub fn verify_rules_signature<P: AsRef<Path>>(
+    rules_path: P,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules_path = rules_path.as_ref();
+    let sig_path = PathBuf::from(format!("{}.sig", rules_path.to_string_lossy()));
+
+    if !rules_path.exists() {
+        return Err(format!("Rules file not found: {:?}", rules_path).into());
+    }
+    if !sig_path.exists() {
+        return Err(format!("Signature file not found: {:?}", sig_path).into());
+    }
+
+    let rules_bytes = std::fs::read(rules_path)?;
+    let sig_bytes = std::fs::read(sig_path)?;
+
+    let public_key = load_public_key(rules_path)?;
+
+    let mut sig_arr = [0u8; 64];
+    if sig_bytes.len() != 64 {
+        return Err("Signature file must be exactly 64 bytes".into());
+    }
+    sig_arr.copy_from_slice(&sig_bytes);
+    let signature = Signature::from_bytes(&sig_arr);
+
+    public_key.verify(&rules_bytes, &signature)?;
+    Ok(())
+}
+
+pub fn sign_rules<P: AsRef<Path>>(
+    rules_path: P,
+    key_path: P,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules_path = rules_path.as_ref();
+    let key_path = key_path.as_ref();
+    let rules_bytes = std::fs::read(rules_path)?;
+    let key_bytes = std::fs::read(key_path)?;
+
+    let mut key_arr = [0u8; 32];
+    if key_bytes.len() != 32 {
+        return Err("Private key file must be exactly 32 bytes".into());
+    }
+    key_arr.copy_from_slice(&key_bytes);
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_arr);
+    let signature = ed25519_dalek::Signer::sign(&signing_key, &rules_bytes);
+
+    let sig_path = PathBuf::from(format!("{}.sig", rules_path.to_string_lossy()));
+    std::fs::write(sig_path, signature.to_bytes())?;
+    Ok(())
+}
+
+pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig, Box<dyn std::error::Error>> {
+    let path_ref = path.as_ref();
+    verify_rules_signature(path_ref)?;
+
+    let mut file = File::open(path_ref)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let config: RulesConfig = serde_json::from_str(&contents)?;
+    Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ferroshield_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const SAMPLE_RULES: &str = r#"{
+        "settings": { "default_action": "quarantine" },
+        "rules": [],
+        "network_blacklist": { "ips": [], "domains": [] }
+    }"#;
+
+    #[test]
+    fn test_gen_keypair_writes_valid_files() {
+        let dir = temp_dir("keypair");
+        let (key_path, pub_path) = gen_rules_keypair(&dir).unwrap();
+
+        let key_bytes = fs::read(&key_path).unwrap();
+        assert_eq!(key_bytes.len(), 32, "private key must be raw 32 bytes");
+
+        let pub_hex = fs::read_to_string(&pub_path).unwrap();
+        assert_eq!(pub_hex.trim().len(), 64, "public key must be 64 hex chars");
+        assert!(decode_hex(pub_hex.trim()).unwrap().len() == 32);
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400, "private key must be 0400");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sign_and_verify_with_rules_pub_override() {
+        let dir = temp_dir("signverify");
+        let rules_path = dir.join("rules.json");
+        fs::write(&rules_path, SAMPLE_RULES).unwrap();
+
+        let (key_path, _) = gen_rules_keypair(&dir).unwrap();
+
+        // Sign then verify: default key discovery must find rules.pub next to rules.json.
+        sign_rules(&rules_path, &key_path).unwrap();
+        verify_rules_signature(&rules_path).unwrap();
+
+        // A tampered rules file must fail verification.
+        fs::write(&rules_path, "{\"tampered\": true}").unwrap();
+        assert!(verify_rules_signature(&rules_path).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_runtime_config_prefers_env() {
+        let dir = temp_dir("runtimecfg");
+        let cfg_path = dir.join("config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"default_action": "delete", "downloads_dir": "/tmp/dl"}"#,
+        )
+        .unwrap();
+
+        // SAFETY: test-only env mutation, single-threaded test.
+        unsafe {
+            std::env::set_var("FERROSHIELD_CONFIG", &cfg_path);
+        }
+        let cfg = load_runtime_config();
+        // SAFETY: test-only env mutation, single-threaded test.
+        unsafe {
+            std::env::remove_var("FERROSHIELD_CONFIG");
+        }
+
+        assert_eq!(cfg.default_action.as_deref(), Some("delete"));
+        assert_eq!(cfg.downloads_dir.as_deref(), Some("/tmp/dl"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_effective_default_action_falls_back_to_legacy() {
+        let runtime = RuntimeConfig::default();
+        let rules: RulesConfig = serde_json::from_str(
+            r#"{"settings": {"default_action": "delete"}, "rules": [], "network_blacklist": {"ips": [], "domains": []}}"#,
+        ).unwrap();
+        assert_eq!(effective_default_action(&runtime, &rules), "delete");
+
+        let rules_empty: RulesConfig = serde_json::from_str(
+            r#"{"settings": null, "rules": [], "network_blacklist": {"ips": [], "domains": []}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            effective_default_action(&runtime, &rules_empty),
+            "quarantine"
+        );
+    }
+}

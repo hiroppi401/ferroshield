@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# FerroShield - OpenRC init script
+# Install: cp ferroshield.openrc /etc/init.d/ferroshield && rc-update add ferroshield default
+
+description="FerroShield Malware Scanner & Browser Guard Daemon"
+command="/usr/local/bin/ferroshield"
+command_args="monitor"
+command_background="yes"
+pidfile="/run/ferroshield.pid"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    cd /etc/ferroshield || return 1
+    /usr/local/bin/ferroshield block-hosts || true
+}

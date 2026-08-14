@@ -1,0 +1,863 @@
+mod browser;
+mod config;
+mod feed;
+mod network;
+mod quarantine;
+mod scanjob;
+mod scanner;
+mod utils;
+mod web;
+
+use config::load_rules;
+use quarantine::QuarantineManager;
+use scanner::Scanner;
+use utils::{log_detection, log_message};
+
+use std::env;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+fn print_usage() {
+    println!("FerroShield - Pemindai Malware, Karantina, Jaringan & UI Dashboard (Linux Only)");
+    println!("Penggunaan:");
+    println!(
+        "  ferroshield scan <path> [--delete]    Memindai file atau direktori (tambahkan --delete untuk langsung menghapus, --json untuk output progress JSON)"
+    );
+    println!(
+        "  ferroshield monitor                   Menjalankan monitor real-time & UI Dashboard (port 8686)"
+    );
+    println!("  ferroshield web [--port <port>]       Menjalankan UI Dashboard Konsol Web saja");
+    println!("  ferroshield quarantine list           Melihat daftar file yang sedang dikarantina");
+    println!(
+        "  ferroshield quarantine restore <id>   Memulihkan file dari karantina ke posisi semula"
+    );
+    println!("  ferroshield quarantine delete <id>    Menghapus file karantina secara permanen");
+    println!(
+        "  ferroshield block-hosts               Menambahkan blacklist domain ke /etc/hosts (butuh root)"
+    );
+    println!(
+        "  ferroshield clean-hosts               Membersihkan blacklist domain dari /etc/hosts (butuh root)"
+    );
+    println!(
+        "  ferroshield gen-keys [dir]            Membuat keypair Ed25519 baru (rules.key + rules.pub)"
+    );
+    println!(
+        "  ferroshield sign-rules                Menandatangani rules.json memakai rules.key (mekanisme resmi)"
+    );
+    println!(
+        "  ferroshield update-feed               Memperbarui threat feed (IP & Domain blacklist) secara manual"
+    );
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        print_usage();
+        return;
+    }
+
+    let command = args[1].as_str();
+
+    // Set quarantine path (local .quarantine folder if non-root, or /var/lib/ferroshield/quarantine if root)
+    let quarantine_path = if sudo::check() == sudo::RunningAs::Root {
+        PathBuf::from("/var/lib/ferroshield/quarantine")
+    } else {
+        env::current_dir().unwrap().join(".quarantine")
+    };
+
+    // 1. Handle subcommands that do not require loading verified rules.json
+    match command {
+        "gen-keys" => {
+            let dir = args.get(2).map(String::as_str).unwrap_or(".");
+            println!("[*] Membuat keypair Ed25519 baru di direktori: {}...", dir);
+            match config::gen_rules_keypair(dir) {
+                Ok((key_path, pub_path)) => {
+                    println!("[+] Keypair berhasil dibuat!");
+                    println!("[+] Kunci privat : {}", key_path.display());
+                    println!("[+] Kunci publik : {}", pub_path.display());
+                    println!(
+                        "[*] Gunakan: ferroshield sign-rules untuk menandatangani rules.json."
+                    );
+                }
+                Err(e) => eprintln!("[-] Gagal membuat keypair: {}", e),
+            }
+            return;
+        }
+        "sign-rules" => {
+            println!("[*] Menandatangani rules.json memakai rules.key...");
+            let rules_path = "rules.json";
+            let key_path = "rules.key";
+            if !Path::new(key_path).exists() {
+                eprintln!(
+                    "[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu."
+                );
+                return;
+            }
+            match config::sign_rules(rules_path, key_path) {
+                Ok(_) => println!(
+                    "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
+                ),
+                Err(e) => eprintln!("[-] Gagal menandatangani rules: {}", e),
+            }
+            return;
+        }
+        "update-feed" => {
+            println!("[*] Memulai pembaruan threat feed secara manual...");
+            match feed::update_threat_feed() {
+                Ok(_) => println!("[+] Pembaruan threat feed selesai dengan sukses!"),
+                Err(e) => eprintln!("[-] Gagal memperbarui threat feed: {}", e),
+            }
+            return;
+        }
+        "clean-hosts" => {
+            if let Err(e) = browser::clean_hosts_file() {
+                eprintln!("[-] Gagal membersihkan /etc/hosts: {}", e);
+                eprintln!("[-] Anda perlu menjalankan perintah ini sebagai root/sudo.");
+            } else {
+                println!("[+] Semua entry blocklist FerroShield berhasil dibersihkan.");
+            }
+            return;
+        }
+        "quarantine" => {
+            if args.len() < 3 {
+                println!("[-] Gunakan: ferroshield quarantine [list|restore|delete]");
+                return;
+            }
+            let quarantine_mgr = match QuarantineManager::new(&quarantine_path) {
+                Ok(mgr) => mgr,
+                Err(e) => {
+                    eprintln!("[-] Gagal inisialisasi folder karantina: {}", e);
+                    return;
+                }
+            };
+            let sub = args[2].as_str();
+            match sub {
+                "list" => match quarantine_mgr.list_quarantined() {
+                    Ok(list) => {
+                        if list.is_empty() {
+                            println!("[+] Tidak ada file dalam karantina.");
+                        } else {
+                            println!("[*] Daftar File Terkarantina:");
+                            for item in list {
+                                println!(
+                                    "ID: {}\n  Asal: {}\n  SHA-256: {}\n  Aturan: {}\n",
+                                    item.id,
+                                    item.original_path,
+                                    item.hash_sha256,
+                                    item.triggered_rule_id
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[-] Gagal membaca daftar karantina: {}", e),
+                },
+                "restore" => {
+                    if args.len() < 4 {
+                        println!("[-] Gunakan: ferroshield quarantine restore <id>");
+                        return;
+                    }
+                    let id = &args[3];
+                    match quarantine_mgr.restore_file(id) {
+                        Ok(_) => println!("[+] Berhasil memulihkan file dengan ID: {}", id),
+                        Err(e) => eprintln!("[-] Gagal memulihkan file: {}", e),
+                    }
+                }
+                "delete" => {
+                    if args.len() < 4 {
+                        println!("[-] Gunakan: ferroshield quarantine delete <id>");
+                        return;
+                    }
+                    let id = &args[3];
+                    let q_file = quarantine_mgr
+                        .quarantine_dir
+                        .join(format!("{}.quarantined", id));
+                    let m_file = quarantine_mgr
+                        .quarantine_dir
+                        .join(format!("{}.metadata", id));
+
+                    if q_file.exists() && m_file.exists() {
+                        let _ = std::fs::remove_file(q_file);
+                        let _ = std::fs::remove_file(m_file);
+                        println!(
+                            "[+] File karantina ID {} telah dihapus secara permanen.",
+                            id
+                        );
+                    } else {
+                        println!("[-] File karantina dengan ID tersebut tidak ditemukan.");
+                    }
+                }
+                _ => println!("[-] Subcommand karantina tidak valid."),
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // 2. Handle subcommands that require loading verified rules.json
+    let quarantine_mgr = match QuarantineManager::new(&quarantine_path) {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            eprintln!("[-] Gagal inisialisasi folder karantina: {}", e);
+            return;
+        }
+    };
+
+    let config_path = "rules.json";
+    let rules_config = match load_rules(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("[-] Gagal memuat rules.json: {}", e);
+            eprintln!("[-] Pastikan file rules.json berada di direktori yang sama.");
+            return;
+        }
+    };
+
+    let runtime_config = config::load_runtime_config();
+    let default_action = config::effective_default_action(&runtime_config, &rules_config);
+    let downloads_dir = config::effective_downloads_dir(&runtime_config, &rules_config);
+
+    let scanner = Scanner::new(rules_config.rules.clone(), 10);
+
+    match command {
+        "scan" => {
+            if args.len() < 3 {
+                println!("[-] Gunakan: ferroshield scan <path> [--delete]");
+                return;
+            }
+            let target = args[2].clone();
+            let delete_flag = args.iter().any(|a| a == "--delete");
+            let json_flag = args.iter().any(|a| a == "--json");
+            let resume_flag = args.iter().any(|a| a == "--resume");
+            let interactive = !json_flag && std::io::stdin().is_terminal();
+            let code = scanjob::run_scan(
+                &scanner,
+                &quarantine_mgr,
+                &target,
+                delete_flag,
+                json_flag,
+                resume_flag,
+                interactive,
+            );
+            std::process::exit(code);
+        }
+        "monitor" => {
+            log_message("[*] Memulai FerroShield Background Guard Daemon...");
+
+            if let Err(e) = utils::drop_capabilities() {
+                log_message(&format!(
+                    "[-] Gagal menurunkan capability: {}. Melanjutkan dengan privilege penuh.",
+                    e
+                ));
+            }
+
+            // Shared components for threads
+            let scanner_arc = Arc::new(scanner);
+            let quarantine_arc = Arc::new(quarantine_mgr.clone());
+            let rules_config_arc = Arc::new(rules_config.clone());
+
+            // 0. Start Web UI Dashboard server automatically in background (on port 8686)
+            web::start_web_server(
+                "127.0.0.1",
+                8686,
+                (*scanner_arc).clone(),
+                quarantine_mgr.clone(),
+                rules_config.clone(),
+                default_action.clone(),
+            );
+
+            // 1. Thread Jaringan (Network connection monitor)
+            let net_scanner = scanner_arc.clone();
+            let net_quarantine = quarantine_arc.clone();
+            let net_config = rules_config_arc.clone();
+            let net_action = default_action.clone();
+            let net_handle = thread::spawn(move || {
+                log_message("[*] Monitor Jaringan: Menginisialisasi eBPF...");
+                let run_fallback = || {
+                    log_message(
+                        "[*] Monitor Jaringan: Memulai pemantauan koneksi keluar (procfs polling fallback)...",
+                    );
+                    loop {
+                        if let Ok(conns) = network::get_active_connections() {
+                            for conn in conns {
+                                // Check if remote IP is in blacklist
+                                if net_config.network_blacklist.ips.contains(&conn.remote_ip) {
+                                    log_detection(&format!(
+                                        "[!] DETEKSI JARINGAN: Koneksi keluar ke IP terlarang {} dideteksi!",
+                                        conn.remote_ip
+                                    ));
+
+                                    // 1. Quarantining/Deleting binary FIRST (so watchdog process cannot re-execute file from disk)
+                                    if let Some(pid) = conn.pid {
+                                        log_detection(&format!(
+                                            "[!] Proses berbahaya terdeteksi: PID {} ({:?})",
+                                            pid, conn.process_name
+                                        ));
+
+                                        if let Some(ref proc_name) = conn.process_name {
+                                            let proc_path = Path::new(proc_name);
+                                            if proc_path.exists() && proc_path.is_file() {
+                                                if net_action == "delete" {
+                                                    if let Err(e) = std::fs::remove_file(proc_path)
+                                                    {
+                                                        log_message(&format!(
+                                                            "[-] Gagal menghapus file proses berbahaya: {}",
+                                                            e
+                                                        ));
+                                                    } else {
+                                                        log_message(
+                                                            "[+] File eksekusi proses berbahaya berhasil dihapus permanen.",
+                                                        );
+                                                    }
+                                                } else {
+                                                    if let Ok((sha, _)) =
+                                                        net_scanner.calculate_hashes(proc_path)
+                                                    {
+                                                        let _ = net_quarantine.quarantine_file(
+                                                            proc_path,
+                                                            &sha,
+                                                            "NETWORK-BREACH-PID",
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 2. Block the remote IP via firewall SECOND
+                                    if let Err(e) = network::block_ip(&conn.remote_ip) {
+                                        log_message(&format!(
+                                            "[-] Gagal memblokir IP {} di firewall: {}",
+                                            conn.remote_ip, e
+                                        ));
+                                    } else {
+                                        log_message(&format!(
+                                            "[+] IP {} berhasil diblokir di iptables.",
+                                            conn.remote_ip
+                                        ));
+                                    }
+
+                                    // 3. Send KILL signal to PID THIRD (after binary is isolated & IP blocked)
+                                    if let Some(pid) = conn.pid {
+                                        if let Err(e) = network::kill_process(pid) {
+                                            log_message(&format!(
+                                                "[-] Gagal menghentikan PID {}: {}",
+                                                pid, e
+                                            ));
+                                        } else {
+                                            log_message(&format!(
+                                                "[+] Berhasil menghentikan PID {}",
+                                                pid
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                };
+
+                match network::init_ebpf_monitor(
+                    &net_config.network_blacklist.ips,
+                    &net_config.network_blacklist.domains,
+                    (*net_scanner).clone(),
+                    (*net_quarantine).clone(),
+                    &net_action,
+                ) {
+                    Ok(mut ebpf_monitor) => {
+                        log_message("[+] Monitor Jaringan: eBPF aktif secara real-time!");
+                        if let Err(e) = ebpf_monitor.run() {
+                            log_message(&format!(
+                                "[-] Gagal menjalankan eBPF: {}. Menggunakan fallback polling procfs.",
+                                e
+                            ));
+                            run_fallback();
+                        } else {
+                            // Keep the thread alive while eBPF runs in spawned threads
+                            loop {
+                                thread::sleep(Duration::from_secs(3600));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log_message(&format!(
+                            "[-] Gagal memuat eBPF: {}. Menggunakan fallback polling procfs.",
+                            e
+                        ));
+                        run_fallback();
+                    }
+                }
+            });
+
+            // 2. Thread Browser Guard - Downloads Watcher
+            let watch_scanner = (*scanner_arc).clone();
+            let watch_quarantine = (*quarantine_arc).clone();
+            let watch_action = default_action.clone();
+            let watch_custom_path = downloads_dir.clone();
+            let watch_handle = thread::spawn(move || {
+                let mut logged_not_found = false;
+                loop {
+                    let custom_path = watch_custom_path.as_deref();
+                    let downloads_dirs = browser::get_downloads_dirs(custom_path);
+
+                    if !downloads_dirs.is_empty() {
+                        logged_not_found = false;
+                        if let Err(e) = browser::watch_downloads_directories(
+                            &downloads_dirs,
+                            custom_path,
+                            watch_scanner.clone(),
+                            watch_quarantine.clone(),
+                            &watch_action,
+                        ) {
+                            log_message(&format!(
+                                "[-] Error pada real-time downloads watcher: {}. Mencoba kembali dalam 15 detik...",
+                                e
+                            ));
+                        }
+                    } else {
+                        if !logged_not_found {
+                            log_message(
+                                "[-] Folder unduhan (Downloads/Unduhan) tidak ditemukan. Mencoba mencari secara berkala...",
+                            );
+                            logged_not_found = true;
+                        }
+                    }
+                    thread::sleep(Duration::from_secs(15));
+                }
+            });
+
+            // 3. Thread Browser Guard - Extension Scanner (Periodic check)
+            let ext_config = rules_config_arc.clone();
+            let ext_handle = thread::spawn(move || {
+                log_message("[*] Monitor Browser: Memulai pengecekan ekstensi berkala...");
+                loop {
+                    let blacklist_ids = &ext_config
+                        .rules
+                        .iter()
+                        .filter_map(|r| r.signatures.extension_ids.clone())
+                        .flatten()
+                        .collect::<Vec<String>>();
+
+                    if !blacklist_ids.is_empty() {
+                        let detected = browser::scan_browser_extensions(blacklist_ids);
+                        for item in detected {
+                            log_detection(&format!(
+                                "[!] PERINGATAN BROWSER GUARD: Ekstensi berbahaya terdeteksi: {}",
+                                item
+                            ));
+                        }
+                    }
+                    // Scan extensions every 60 seconds
+                    thread::sleep(Duration::from_secs(60));
+                }
+            });
+
+            // 4. Thread Cryptominer & Suspicious Process Guard
+            let miner_scanner = scanner_arc.clone();
+            let miner_quarantine = quarantine_arc.clone();
+            let miner_action = default_action.clone();
+            let miner_handle = thread::spawn(move || {
+                log_message(
+                    "[*] Monitor Miner: Memulai perlindungan terhadap malware crypto miner...",
+                );
+
+                use std::collections::HashMap;
+                use std::time::Instant;
+
+                struct ProcessCpuState {
+                    utime: u64,
+                    stime: u64,
+                    timestamp: Instant,
+                    consecutive_high_ticks: u32,
+                }
+
+                let mut cpu_history: HashMap<u32, ProcessCpuState> = HashMap::new();
+                let num_cores = get_cpu_cores();
+
+                loop {
+                    // Check 1: Processes executing from suspicious directories (/tmp, /dev/shm, etc.)
+                    let susp_procs = network::find_suspicious_processes();
+                    for (pid, path_str) in susp_procs {
+                        log_detection(&format!(
+                            "[!] MONITOR MINER: Mendeteksi proses mencurigakan berjalan dari folder temp: PID {} -> Path: {}",
+                            pid, path_str
+                        ));
+
+                        // 1. Remove or quarantine the malicious executable FIRST (prevents watchdog respawn)
+                        let proc_path = Path::new(&path_str);
+                        if proc_path.exists() && proc_path.is_file() {
+                            if miner_action == "delete" {
+                                if let Err(e) = std::fs::remove_file(proc_path) {
+                                    log_message(&format!(
+                                        "[-] Gagal menghapus file malware: {}",
+                                        e
+                                    ));
+                                } else {
+                                    log_message(&format!(
+                                        "[+] File malware {} berhasil dihapus permanen.",
+                                        path_str
+                                    ));
+                                }
+                            } else {
+                                if let Ok((sha, _)) = miner_scanner.calculate_hashes(proc_path) {
+                                    let _ = miner_quarantine.quarantine_file(
+                                        proc_path,
+                                        &sha,
+                                        "SUSPICIOUS-TEMP-PATH",
+                                    );
+                                    log_message(&format!(
+                                        "[+] File malware {} dipindahkan ke folder karantina.",
+                                        path_str
+                                    ));
+                                }
+                            }
+                        }
+
+                        // 2. Kill process SECOND (after binary on disk is neutralized)
+                        if let Err(e) = network::kill_process(pid) {
+                            log_message(&format!("[-] Gagal menghentikan PID {}: {}", pid, e));
+                        } else {
+                            log_message(&format!(
+                                "[+] Berhasil menghentikan PID {} untuk mencegah eksploitasi.",
+                                pid
+                            ));
+                        }
+                    }
+
+                    // Check 2: Active connections to mining ports
+                    if let Ok(conns) = network::get_active_connections() {
+                        for conn in conns {
+                            if network::is_mining_port(conn.remote_port) {
+                                log_detection(&format!(
+                                    "[!] DETEKSI MINING POOL: Koneksi aktif ke port Stratum Mining {} dideteksi!",
+                                    conn.remote_port
+                                ));
+
+                                // 1. Quarantine or delete binary FIRST
+                                if let Some(ref proc_name) = conn.process_name {
+                                    let proc_path = Path::new(proc_name);
+                                    if proc_path.exists() && proc_path.is_file() {
+                                        if miner_action == "delete" {
+                                            let _ = std::fs::remove_file(proc_path);
+                                        } else {
+                                            if let Ok((sha, _)) =
+                                                miner_scanner.calculate_hashes(proc_path)
+                                            {
+                                                let _ = miner_quarantine.quarantine_file(
+                                                    proc_path,
+                                                    &sha,
+                                                    "CRYPTO-MINER-PORT",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 2. Block the mining pool IP address SECOND
+                                let _ = network::block_ip(&conn.remote_ip);
+
+                                // 3. Kill associated process THIRD (after binary isolation & IP block)
+                                if let Some(pid) = conn.pid {
+                                    if let Err(e) = network::kill_process(pid) {
+                                        log_message(&format!(
+                                            "[-] Gagal menghentikan proses miner PID {}: {}",
+                                            pid, e
+                                        ));
+                                    } else {
+                                        log_message(&format!(
+                                            "[+] Berhasil menghentikan proses miner PID {}",
+                                            pid
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check 3: Behavioral CPU Mining Detection
+                    let proc_dir = Path::new("/proc");
+                    let mut current_pids = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(proc_dir) {
+                        for entry in entries.filter_map(Result::ok) {
+                            if entry.path().is_dir()
+                                && let Some(pid_str) = entry.file_name().to_str()
+                                && let Ok(pid) = pid_str.parse::<u32>()
+                            {
+                                current_pids.push(pid);
+                            }
+                        }
+                    }
+
+                    let now = Instant::now();
+                    for &pid in &current_pids {
+                        if let Some((utime, stime)) = get_process_cpu_time(pid) {
+                            if let Some(state) = cpu_history.get_mut(&pid) {
+                                let elapsed = now.duration_since(state.timestamp).as_secs_f64();
+                                if elapsed > 0.1 {
+                                    let delta_proc =
+                                        (utime + stime).saturating_sub(state.utime + state.stime);
+                                    // Total CPU usage percentage normalized by cores count
+                                    let usage = (delta_proc as f64 / 100.0)
+                                        / (elapsed * num_cores as f64)
+                                        * 100.0;
+
+                                    state.utime = utime;
+                                    state.stime = stime;
+                                    state.timestamp = now;
+
+                                    if usage > 80.0 {
+                                        state.consecutive_high_ticks += 1;
+                                        if state.consecutive_high_ticks >= 3
+                                            && let Some(exe_path) =
+                                                network::get_process_executable_path(pid)
+                                        {
+                                            let is_whitelisted = exe_path.starts_with("/usr/bin/")
+                                                || exe_path.starts_with("/bin/")
+                                                || exe_path.starts_with("/usr/sbin/")
+                                                || exe_path.starts_with("/sbin/")
+                                                || exe_path.starts_with("/usr/lib/")
+                                                || exe_path.starts_with("/lib/")
+                                                || exe_path.contains("ferroshield");
+
+                                            if !is_whitelisted {
+                                                log_detection(&format!(
+                                                    "[!] HEURISTIC-MINER: Perilaku cryptomining terdeteksi! PID {} ({}) menggunakan CPU sangat tinggi ({:.2}%) secara konsisten.",
+                                                    pid, exe_path, usage
+                                                ));
+
+                                                // 1. Quarantine/Delete process binary FIRST (prevents watchdog process resurrection)
+                                                let proc_path = Path::new(&exe_path);
+                                                if proc_path.exists() && proc_path.is_file() {
+                                                    if miner_action == "delete" {
+                                                        let _ = std::fs::remove_file(proc_path);
+                                                    } else if let Ok((sha, _)) =
+                                                        miner_scanner.calculate_hashes(proc_path)
+                                                    {
+                                                        let _ = miner_quarantine.quarantine_file(
+                                                            proc_path,
+                                                            &sha,
+                                                            "BEHAVIORAL-MINER-CPU",
+                                                        );
+                                                    }
+                                                }
+
+                                                // 2. Terminate process SECOND
+                                                let _ = network::kill_process(pid);
+                                            }
+                                        }
+                                    } else {
+                                        state.consecutive_high_ticks = 0;
+                                    }
+                                }
+                            } else {
+                                cpu_history.insert(
+                                    pid,
+                                    ProcessCpuState {
+                                        utime,
+                                        stime,
+                                        timestamp: now,
+                                        consecutive_high_ticks: 0,
+                                    },
+                                );
+                            }
+                        }
+                    }
+
+                    // Clean up dead processes from history
+                    cpu_history.retain(|pid, _| current_pids.contains(pid));
+
+                    thread::sleep(Duration::from_secs(5));
+                }
+            });
+
+            // 5. Thread Rules Integrity Guard
+            let rules_file_path = config_path.to_string();
+            let mut last_modified = std::fs::metadata(&rules_file_path)
+                .and_then(|m| m.modified())
+                .unwrap_or_else(|_| std::time::SystemTime::now());
+
+            let integrity_handle = thread::spawn(move || {
+                log_message("[*] Monitor Integritas: Memulai pemantauan rules.json...");
+                loop {
+                    thread::sleep(Duration::from_secs(5));
+                    if let Ok(meta) = std::fs::metadata(&rules_file_path)
+                        && let Ok(modified) = meta.modified()
+                        && modified != last_modified
+                    {
+                        log_message(
+                            "[*] Terdeteksi perubahan pada rules.json. Memverifikasi tanda tangan...",
+                        );
+                        match config::verify_rules_signature(&rules_file_path) {
+                            Ok(_) => {
+                                log_message(
+                                    "[+] Tanda tangan rules.json valid. Memuat ulang rules...",
+                                );
+                                last_modified = modified;
+                            }
+                            Err(e) => {
+                                log_detection(&format!(
+                                    "[!] PERINGATAN KEBOCORAN/INTEGRITAS: rules.json diubah secara tidak sah! Kesalahan: {}. Perubahan ditolak.",
+                                    e
+                                ));
+                                last_modified = modified;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 6. Thread Auto Update Threat Feed
+            let feed_handle = thread::spawn(move || {
+                log_message(
+                    "[*] Auto Update Threat Feed: Memulai pembaharuan otomatis berkala (setiap 24 jam)...",
+                );
+                loop {
+                    // Sleep 30s before first run to let main daemon launch completely
+                    thread::sleep(Duration::from_secs(30));
+                    if let Err(e) = feed::update_threat_feed() {
+                        log_message(&format!("[-] Gagal memperbarui threat feed: {}", e));
+                    }
+                    // Wait 24 hours
+                    thread::sleep(Duration::from_secs(24 * 3600));
+                }
+            });
+
+            // 7. Graceful shutdown listener (SIGTERM/SIGINT)
+            thread::spawn(utils::wait_for_shutdown_signal);
+
+            // Let daemon run indefinitely
+            let _ = net_handle.join();
+            let _ = watch_handle.join();
+            let _ = ext_handle.join();
+            let _ = miner_handle.join();
+            let _ = integrity_handle.join();
+            let _ = feed_handle.join();
+        }
+        "web" => {
+            let mut port = 8686;
+            if args.len() >= 4
+                && args[2] == "--port"
+                && let Ok(p) = args[3].parse::<u16>()
+            {
+                port = p;
+            }
+
+            println!("[*] Memulai FerroShield Web Dashboard Mandiri...");
+            web::start_web_server(
+                "127.0.0.1",
+                port,
+                scanner,
+                quarantine_mgr,
+                rules_config,
+                default_action,
+            );
+
+            // Graceful shutdown listener (SIGTERM/SIGINT)
+            thread::spawn(utils::wait_for_shutdown_signal);
+
+            // Keep the main thread alive for the web server thread
+            loop {
+                thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        "block-hosts" => {
+            println!("[*] Memproses blacklist domain ke /etc/hosts...");
+            let domains = &rules_config.network_blacklist.domains;
+            if let Err(e) = browser::block_domains_in_hosts(domains) {
+                eprintln!("[-] Gagal menulis ke /etc/hosts: {}", e);
+                eprintln!("[-] Anda perlu menjalankan perintah ini sebagai root/sudo.");
+            } else {
+                println!("[+] Semua domain berbahaya berhasil dialihkan ke 127.0.0.1.");
+            }
+        }
+        "clean-hosts" => {
+            if let Err(e) = browser::clean_hosts_file() {
+                eprintln!("[-] Gagal membersihkan /etc/hosts: {}", e);
+                eprintln!("[-] Anda perlu menjalankan perintah ini sebagai root/sudo.");
+            } else {
+                println!("[+] Semua entry blocklist FerroShield berhasil dibersihkan.");
+            }
+        }
+        "sign-rules" => {
+            println!("[*] Menandatangani rules.json memakai rules.key...");
+            let rules_path = "rules.json";
+            let key_path = "rules.key";
+            if !Path::new(key_path).exists() {
+                eprintln!(
+                    "[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu."
+                );
+                return;
+            }
+            match config::sign_rules(rules_path, key_path) {
+                Ok(_) => println!(
+                    "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
+                ),
+                Err(e) => eprintln!("[-] Gagal menandatangani rules: {}", e),
+            }
+        }
+        "update-feed" => {
+            println!("[*] Memulai pembaruan threat feed secara manual...");
+            match feed::update_threat_feed() {
+                Ok(_) => println!("[+] Pembaruan threat feed selesai dengan sukses!"),
+                Err(e) => eprintln!("[-] Gagal memperbarui threat feed: {}", e),
+            }
+        }
+        _ => {
+            print_usage();
+        }
+    }
+}
+
+// Simple module to check if running as root
+mod sudo {
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum RunningAs {
+        Root,
+        User,
+    }
+
+    pub fn check() -> RunningAs {
+        if let Ok(uid) = std::env::var("UID")
+            && uid == "0"
+        {
+            return RunningAs::Root;
+        }
+        // Fallback check using libc or nix if needed, or by executing `id -u`
+        if let Ok(output) = std::process::Command::new("id").arg("-u").output() {
+            let uid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if uid_str == "0" {
+                return RunningAs::Root;
+            }
+        }
+        RunningAs::User
+    }
+}
+
+fn get_cpu_cores() -> usize {
+    if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
+        content
+            .lines()
+            .filter(|line| line.starts_with("processor"))
+            .count()
+            .max(1)
+    } else {
+        1
+    }
+}
+
+fn get_process_cpu_time(pid: u32) -> Option<(u64, u64)> {
+    let stat_path = format!("/proc/{}/stat", pid);
+    let content = std::fs::read_to_string(stat_path).ok()?;
+    let rparen_idx = content.rfind(')')?;
+    let post_paren = &content[rparen_idx + 1..];
+    let parts: Vec<&str> = post_paren.split_whitespace().collect();
+    if parts.len() < 13 {
+        return None;
+    }
+    let utime = parts[11].parse::<u64>().ok()?;
+    let stime = parts[12].parse::<u64>().ok()?;
+    Some((utime, stime))
+}

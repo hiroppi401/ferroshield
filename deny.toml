@@ -1,0 +1,40 @@
+# cargo-deny configuration for FerroShield
+
+[graph]
+# If true, alerts if multiple versions of the same crate are used
+targets = []
+
+[licenses]
+unlicensed = "deny"
+# Allow permissive licenses, but deny strict copyleft licenses like GPLv3, AGPLv3
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "OpenSSL",
+    "Unicode-DFS-2016",
+]
+deny = [
+    "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "AGPL-3.0",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn" # Warn when there are duplicate versions of the same dependency
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

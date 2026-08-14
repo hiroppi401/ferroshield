@@ -1,0 +1,6 @@
+# cargo-audit configuration for FerroShield
+
+[advisories]
+# List of advisory IDs to ignore (e.g., RUSTSEC-202X-XXXX) if they are false positives
+ignore = []
+informational = []

@@ -1,0 +1,1702 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FerroShield | Security Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <!-- Modern typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: hsl(222, 25%, 8%);
+            --card-bg: rgba(22, 28, 41, 0.45);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: hsl(210, 20%, 92%);
+            --text-muted: hsl(210, 10%, 65%);
+            --primary: hsl(145, 85%, 48%);
+            --primary-glow: rgba(16, 185, 129, 0.15);
+            --alert: hsl(355, 85%, 55%);
+            --alert-glow: rgba(239, 68, 68, 0.15);
+            --info: hsl(200, 95%, 50%);
+            --info-glow: rgba(14, 165, 233, 0.15);
+            --sidebar-width: 260px;
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            min-height: 100vh;
+            overflow-x: hidden;
+            user-select: text; /* Pastikan teks dapat disalin */
+        }
+
+        /* Sidebar Styling */
+        aside {
+            width: var(--sidebar-width);
+            background: rgba(10, 12, 18, 0.6);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 2rem 1.5rem;
+            position: fixed;
+            height: 100vh;
+            left: 0;
+            top: 0;
+            z-index: 100;
+            box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 3rem;
+        }
+
+        .brand-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--primary), var(--info));
+            border-radius: 8px;
+            box-shadow: 0 0 15px var(--primary-glow);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 1.25rem;
+            color: var(--bg-color);
+        }
+
+        .brand-name {
+            font-weight: 800;
+            font-size: 1.25rem;
+            letter-spacing: 0.5px;
+            background: linear-gradient(to right, #fff, var(--text-muted));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .menu {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            flex: 1;
+        }
+
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.85rem 1rem;
+            border-radius: 8px;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .menu-icon {
+            width: 20px;
+            height: 20px;
+            stroke: currentColor;
+            stroke-width: 2;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+            transition: var(--transition);
+        }
+
+        .menu-item:hover, .menu-item.active {
+            color: #fff;
+            background-color: hsla(210, 100%, 100%, 0.05);
+        }
+
+        .menu-item.active {
+            border-left: 3px solid var(--primary);
+            padding-left: calc(1rem - 3px);
+            background-color: var(--primary-glow);
+            color: var(--primary);
+        }
+
+        .menu-item:hover .menu-icon, .menu-item.active .menu-icon {
+            transform: scale(1.1);
+            filter: drop-shadow(0 0 5px currentColor);
+        }
+
+        .system-status-indicator {
+            margin-top: auto;
+            background-color: hsla(222, 20%, 5%, 0.5);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .status-dot-container {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--primary);
+            box-shadow: 0 0 10px var(--primary);
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-dot.danger {
+            background-color: var(--alert);
+            box-shadow: 0 0 10px var(--alert);
+        }
+
+        .status-text {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin-top: 0.35rem;
+        }
+
+        /* Main Workspace */
+        main {
+            margin-left: var(--sidebar-width);
+            flex: 1;
+            padding: 2.5rem 3rem;
+            max-width: 1400px;
+            width: 100%;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2.5rem;
+        }
+
+        h1 {
+            font-weight: 800;
+            font-size: 2rem;
+            letter-spacing: -0.5px;
+        }
+
+        .time-widget {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Card Widgets */
+        .grid-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .card-stat {
+            background-color: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            transition: var(--transition);
+        }
+
+        .card-stat:hover {
+            transform: translateY(-4px);
+            border-color: hsla(222, 20%, 40%, 0.4);
+            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4);
+        }
+
+        .stat-label {
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 800;
+        }
+
+        .stat-meta {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        /* Views (Tabs) */
+        .view-content {
+            display: none;
+            animation: fadeIn 0.4s ease;
+        }
+
+        .view-content.active {
+            display: block;
+        }
+
+        /* Terminal Console (Realtime Logs) */
+        .terminal {
+            background: rgba(10, 12, 18, 0.85);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            padding: 1.5rem;
+            height: 480px;
+            overflow-y: auto;
+            box-shadow: inset 0 4px 20px rgba(0,0,0,0.6);
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            user-select: text; /* Mengizinkan penyalinan log terminal */
+        }
+
+        .terminal::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .terminal::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.1);
+        }
+
+        .terminal::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        .terminal::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .log-entry {
+            font-size: 0.85rem;
+            line-height: 1.45;
+            color: var(--text-color);
+            word-break: break-all;
+        }
+
+        .log-entry.alert {
+            color: var(--alert);
+            font-weight: 600;
+            text-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
+        }
+
+        .log-entry.success {
+            color: var(--primary);
+            text-shadow: 0 0 8px rgba(16, 185, 129, 0.2);
+        }
+
+        /* Forms & Inputs */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        label {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        input[type="text"] {
+            background-color: hsla(222, 20%, 5%, 0.5);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.85rem 1rem;
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.95rem;
+            width: 100%;
+            outline: none;
+            transition: var(--transition);
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--info);
+            box-shadow: 0 0 10px var(--info-glow);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, var(--primary), #10b981);
+            color: var(--bg-color);
+            border: none;
+            border-radius: 8px;
+            padding: 0.85rem 1.75rem;
+            font-weight: 700;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: var(--transition);
+            box-shadow: 0 4px 15px var(--primary-glow);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .btn:hover {
+            opacity: 0.95;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--primary-glow);
+        }
+
+        .btn-secondary {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            box-shadow: none;
+        }
+
+        .btn-secondary:hover {
+            background: hsla(210, 100%, 100%, 0.05);
+            border-color: var(--text-muted);
+            box-shadow: none;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--alert), #ef4444);
+            color: #fff;
+            box-shadow: 0 4px 15px var(--alert-glow);
+        }
+
+        .btn-danger:hover {
+            box-shadow: 0 6px 20px var(--alert-glow);
+        }
+
+        /* Checkbox styling */
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .checkbox-container input {
+            display: none;
+        }
+
+        .checkmark {
+            width: 18px;
+            height: 18px;
+            border: 2px solid var(--border-color);
+            border-radius: 4px;
+            display: inline-block;
+            position: relative;
+            transition: var(--transition);
+        }
+
+        .checkbox-container input:checked + .checkmark {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .checkbox-container input:checked + .checkmark::after {
+            content: '';
+            position: absolute;
+            width: 4px;
+            height: 8px;
+            border: solid var(--bg-color);
+            border-width: 0 2px 2px 0;
+            left: 5px;
+            top: 1px;
+            transform: rotate(45deg);
+        }
+
+        /* Tables & Scrollable Container */
+        .table-container {
+            overflow-x: auto;
+            width: 100%;
+            margin-top: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            background-color: var(--card-bg);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.25);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            user-select: text; /* Membuka kunci selection agar data hash/path dapat dicopy */
+        }
+
+        th, td {
+            padding: 1rem 1.5rem;
+            font-size: 0.9rem;
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+
+        td {
+            color: var(--text-color);
+        }
+
+        th {
+            background-color: hsla(222, 20%, 5%, 0.4);
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.5px;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .actions-cell {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .actions-cell .btn {
+            padding: 0.4rem 0.85rem;
+            font-size: 0.8rem;
+        }
+
+        /* Loader */
+        .loader {
+            display: none;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-radius: 50%;
+            border-top-color: var(--info);
+            animation: spin 0.8s linear infinite;
+        }
+
+        /* Animations */
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.15); opacity: 0.7; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Responsive Layout - Sidebar to bottom bar transition */
+        @media (max-width: 900px) {
+            aside {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                top: auto;
+                width: 100%;
+                height: 70px;
+                flex-direction: row;
+                padding: 0;
+                border-right: none;
+                border-top: 1px solid var(--border-color);
+                background: rgba(10, 12, 18, 0.95);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                z-index: 1000;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+            }
+            .brand, .system-status-indicator {
+                display: none;
+            }
+            .menu {
+                flex-direction: row;
+                width: 100%;
+                height: 100%;
+                gap: 0;
+            }
+            .menu-item {
+                flex: 1;
+                height: 100%;
+                border-radius: 0;
+                justify-content: center;
+                align-items: center;
+                flex-direction: column;
+                gap: 0.25rem;
+                padding: 0.5rem 0.25rem;
+                font-size: 0.75rem;
+            }
+            .menu-item.active {
+                border-left: none;
+                border-top: 3px solid var(--primary);
+                padding-left: 0.25rem;
+                padding-top: calc(0.5rem - 3px);
+                background-color: var(--primary-glow);
+                color: var(--primary);
+            }
+            main {
+                margin-left: 0 !important;
+                padding: 1.5rem 1.5rem 85px 1.5rem !important;
+            }
+        }
+        /* Toast notifications */
+        #toast-container {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            max-width: 360px;
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: rgba(30, 20, 25, 0.92);
+            border: 1px solid var(--alert);
+            border-left: 4px solid var(--alert);
+            border-radius: 10px;
+            padding: 0.8rem 1rem;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 20px var(--alert-glow);
+            animation: toastIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .toast-title {
+            font-weight: 700;
+            font-size: 0.85rem;
+            color: var(--alert);
+            margin-bottom: 0.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .toast-body {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-color);
+            word-break: break-word;
+        }
+        .toast.out {
+            animation: toastOut 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateX(30px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes toastOut {
+            from { opacity: 1; transform: translateX(0); }
+            to { opacity: 0; transform: translateX(30px); }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Menu -->
+    <aside>
+        <div class="brand">
+            <div class="brand-icon">FS</div>
+            <div class="brand-name">FerroShield</div>
+        </div>
+
+        <nav class="menu">
+            <a class="menu-item active" onclick="switchView('dashboard', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
+                <span>Dashboard</span>
+            </a>
+            <a class="menu-item" onclick="switchView('scanner', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><circle cx="12" cy="11" r="3"></circle><line x1="12" y1="14" x2="12" y2="14.01"></line></svg>
+                <span>File Scanner</span>
+            </a>
+            <a class="menu-item" onclick="switchView('quarantine', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                <span>Karantina</span>
+            </a>
+            <a class="menu-item" onclick="switchView('network', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><circle cx="12" cy="20" r="1"></circle></svg>
+                <span>Jaringan</span>
+            </a>
+        </nav>
+
+        <div class="system-status-indicator">
+            <div class="status-dot-container">
+                <div class="status-dot" id="system-indicator"></div>
+                <span id="system-status-text">Memonitor...</span>
+            </div>
+            <div class="status-text" style="margin-bottom: 0.75rem;">CPU & Jaringan Aman</div>
+            <button class="btn btn-danger" style="width: 100%; padding: 0.5rem; font-size: 0.8rem; border-radius: 6px;" onclick="shutdownApp()">Matikan FerroShield</button>
+        </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main>
+        <header>
+            <div>
+                <h1 id="view-title">Dashboard</h1>
+                <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Real-time Security Overview</p>
+            </div>
+            <div class="time-widget" id="time-display">00:00:00</div>
+        </header>
+
+        <!-- Widgets Dashboard -->
+        <section class="grid-stats">
+            <div class="card-stat">
+                <div class="stat-label">Status Proteksi</div>
+                <div class="stat-value" id="status-val" style="color: var(--primary);">AKTIF</div>
+                <div class="stat-meta" id="action-meta">Aksi Default: Karantina</div>
+            </div>
+            <div class="card-stat">
+                <div class="stat-label">File Terkarantina</div>
+                <div class="stat-value" id="quarantine-val">0</div>
+                <div class="stat-meta">Butuh review manual</div>
+            </div>
+            <div class="card-stat">
+                <div class="stat-label">Jumlah Aturan Scan</div>
+                <div class="stat-value" id="rules-val">0</div>
+                <div class="stat-meta">rules.json dimuat</div>
+            </div>
+        </section>
+
+        <!-- VIEW: Dashboard (Logs Terminal) -->
+        <section id="view-dashboard" class="view-content active">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem; font-weight: 600;">Real-time System Audit Logs</h2>
+            <div class="terminal" id="log-terminal">
+                <div class="log-entry success">[*] Menghubungkan ke FerroShield Daemon...</div>
+            </div>
+        </section>
+
+        <!-- VIEW: Scanner -->
+        <section id="view-scanner" class="view-content">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1.5rem; font-weight: 600;">Pemindaian File Interaktif</h2>
+            
+            <div class="card-stat" style="width: 100%; display: block; margin-bottom: 2rem;">
+                <div class="form-group">
+                    <label for="scan-path-input">Path Direktori / File</label>
+                    <input type="text" id="scan-path-input" placeholder="Masukkan path lengkap, contoh: /home/user/Downloads">
+                </div>
+                <div class="form-row" style="margin-bottom: 1.5rem; justify-content: space-between;">
+                    <label class="checkbox-container">
+                        <input type="checkbox" id="scan-delete-checkbox">
+                        <span class="checkmark"></span>
+                        Hapus permanen file terinfeksi secara instan
+                    </label>
+                    <div class="loader" id="scan-loader"></div>
+                </div>
+                <button class="btn" id="start-scan-btn" onclick="triggerScan()">Jalankan Scan</button>
+            </div>
+
+            <!-- Progress Bar Card -->
+            <div class="card-stat" id="scan-progress-container" style="width: 100%; display: none; margin-bottom: 2rem;">
+                <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.5rem;">
+                    <span id="scan-progress-status">Menyiapkan scan...</span>
+                    <span id="scan-progress-percentage">0%</span>
+                </div>
+                <div style="width: 100%; height: 10px; background-color: var(--border-color); border-radius: 5px; overflow: hidden; margin-bottom: 0.75rem;">
+                    <div id="scan-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--info), var(--primary)); transition: width 0.2s ease;"></div>
+                </div>
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; word-break: break-all; margin-bottom: 1rem;" id="scan-progress-file">
+                    File: -
+                </div>
+                <div id="scan-controls" style="display: flex; gap: 0.75rem;">
+                    <button class="btn btn-secondary" id="pause-scan-btn" onclick="pauseScan()">Jeda (Pause)</button>
+                    <button class="btn" id="resume-scan-btn" onclick="resumeScan()" style="display: none; background: linear-gradient(135deg, var(--info), #0284c7); color: #fff;">Lanjutkan (Resume)</button>
+                    <button class="btn btn-danger" id="stop-scan-btn" onclick="stopScan()">Hentikan (Stop)</button>
+                    <button class="btn btn-secondary" id="reset-scan-btn" onclick="resetScan()" style="display: none;">Reset / Bersihkan</button>
+                </div>
+            </div>
+
+
+            <div id="scan-results-container" style="display: none;">
+                <h3 style="font-size: 1.1rem; margin-bottom: 1rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    Hasil Scan: <span id="scan-summary-badge" style="padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem; font-weight: 700;">Aman</span>
+                </h3>
+                <div class="table-container">
+                    <table id="scan-results-table">
+                        <thead>
+                            <tr>
+                                <th>Path File</th>
+                                <th>Aturan Terpicu</th>
+                                <th>Status Tindakan</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scan-results-tbody">
+                            <!-- Dynamic Results -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW: Quarantine -->
+        <section id="view-quarantine" class="view-content">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem; font-weight: 600;">Manajer Karantina & Isolasi</h2>
+            <p style="color: var(--text-muted); font-size: 0.9rem;">Daftar file berbahaya yang telah dienkripsi agar tidak bisa dieksekusi secara tidak sengaja.</p>
+
+            <div class="table-container">
+                <table id="quarantine-table">
+                    <thead>
+                        <tr>
+                            <th>Original Path</th>
+                            <th>Hash SHA-256</th>
+                            <th>Aturan Pemicu</th>
+                            <th>Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="quarantine-tbody">
+                        <!-- Dynamic Quarantine List -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- VIEW: Network Monitor -->
+        <section id="view-network" class="view-content">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <div>
+                    <h2 style="font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem;">Monitor Jaringan & Koneksi Aktif</h2>
+                    <p style="color: var(--text-muted); font-size: 0.9rem;">Daftar koneksi TCP aktif keluar (outbound) dan aturan pemblokiran firewall.</p>
+                </div>
+                <button class="btn" onclick="loadNetworkConnections(); loadBlockedIps();">Segarkan Data</button>
+            </div>
+
+            <h3 style="font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.75rem; font-weight: 600;">Koneksi TCP Aktif</h3>
+            <div class="table-container">
+                <table id="network-table">
+                    <thead>
+                        <tr>
+                            <th>Nama Proses (PID)</th>
+                            <th>Alamat Lokal</th>
+                            <th>Alamat Remote</th>
+                            <th>Status</th>
+                            <th>Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="network-tbody">
+                        <!-- Dynamic Active Connections -->
+                    </tbody>
+                </table>
+            </div>
+
+            <h3 style="font-size: 1.1rem; margin-top: 2.5rem; margin-bottom: 0.75rem; font-weight: 600;">IP Terblokir (iptables Firewall)</h3>
+            <div class="table-container">
+                <table id="blocked-table">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="blocked-tbody">
+                        <!-- Dynamic Blocked IPs -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <!-- Toast notification container -->
+    <div id="toast-container"></div>
+
+    <script>
+        // Localhost-only dashboard: no authentication token is used. The server
+        // rejects foreign Host headers and cross-site requests.
+        const authFetch = (url, options = {}) => fetch(url, options);
+
+        // --- Threat notifications (toast + browser notification) ---
+        let notifEnabled = false;
+
+        function requestNotificationPermission() {
+            if (!('Notification' in window)) return;
+            if (Notification.permission === 'granted') {
+                notifEnabled = true;
+            } else if (Notification.permission === 'default') {
+                // Browsers only honor the permission prompt after a user gesture,
+                // so retry on the first interaction with the page.
+                const tryRequest = () => {
+                    if (Notification.permission !== 'default') return;
+                    Notification.requestPermission().then(perm => {
+                        notifEnabled = perm === 'granted';
+                    });
+                };
+                document.addEventListener('click', tryRequest, { once: true });
+                document.addEventListener('keydown', tryRequest, { once: true });
+                tryRequest();
+            }
+        }
+
+        function showToast(message) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+
+            const title = document.createElement('div');
+            title.className = 'toast-title';
+            title.textContent = '⚠ FerroShield: Indikasi Ancaman';
+
+            const body = document.createElement('div');
+            body.className = 'toast-body';
+            body.textContent = message;
+
+            toast.appendChild(title);
+            toast.appendChild(body);
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.classList.add('out');
+                setTimeout(() => toast.remove(), 300);
+            }, 7000);
+        }
+
+        function notifyThreat(message) {
+            showToast(message);
+            if (notifEnabled && 'Notification' in window) {
+                try {
+                    new Notification('FerroShield - Indikasi Ancaman', {
+                        body: message.slice(0, 250),
+                        icon: '/favicon.svg'
+                    });
+                } catch (err) {
+                    console.error("Browser notification error:", err);
+                }
+            }
+        }
+
+        // Update Time display
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('time-display').textContent = now.toTimeString().split(' ')[0];
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
+
+        // Switch Tabs/Views
+        function switchView(viewName, element) {
+            document.querySelectorAll('.menu-item').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.view-content').forEach(el => el.classList.remove('active'));
+
+            if (element) {
+                element.classList.add('active');
+            } else {
+                // Fallback: match by the onclick handler content
+                const items = document.querySelectorAll('.menu-item');
+                for (let el of items) {
+                    const clickAttr = el.getAttribute('onclick');
+                    if (clickAttr && clickAttr.includes(`'${viewName}'`)) {
+                        el.classList.add('active');
+                        break;
+                    }
+                }
+            }
+
+            document.getElementById(`view-${viewName}`).classList.add('active');
+            
+            // Set header title
+            const titles = {
+                'dashboard': 'Dashboard Overview',
+                'scanner': 'Malware Scanner',
+                'quarantine': 'Quarantine Vault',
+                'network': 'Network Monitor'
+            };
+            document.getElementById('view-title').textContent = titles[viewName];
+
+            if (viewName === 'quarantine') {
+                loadQuarantineList();
+            } else if (viewName === 'network') {
+                loadNetworkConnections();
+                loadBlockedIps();
+            }
+        }
+
+        // Fetch Status Dashboard
+        function fetchStatus() {
+            authFetch('/api/status')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('quarantine-val').textContent = data.quarantine_count;
+                    document.getElementById('rules-val').textContent = data.rules_count;
+                    
+                    const statusText = document.getElementById('status-val');
+                    const indicator = document.getElementById('system-indicator');
+                    const systemText = document.getElementById('system-status-text');
+
+                    if (data.status === 'active') {
+                        statusText.textContent = 'AKTIF';
+                        statusText.style.color = 'var(--primary)';
+                        indicator.classList.remove('danger');
+                        systemText.textContent = 'Memonitor...';
+                    } else {
+                        statusText.textContent = 'ALERT';
+                        statusText.style.color = 'var(--alert)';
+                        indicator.classList.add('danger');
+                        systemText.textContent = 'Bahaya!';
+                    }
+                    
+                    document.getElementById('action-meta').textContent = `Aksi Default: ${data.action.toUpperCase()}`;
+                })
+                .catch(err => {
+                    console.error("Error fetching status:", err);
+                });
+        }
+
+        // Fetch logs
+        let lastLogCount = 0;
+        let lastNotifiedCount = 0;
+        function fetchLogs() {
+            authFetch('/api/logs')
+                .then(res => res.json())
+                .then(data => {
+                    // Fire notifications for newly arrived alert lines
+                    const newCount = Math.max(0, data.length - lastNotifiedCount);
+                    if (newCount > 0) {
+                        data.slice(-newCount).forEach(log => {
+                            if (log.includes('[!]') || log.includes('MALWARE') || log.includes('ALERT') || log.includes('DETEKSI')) {
+                                notifyThreat(log.replace(/^\[\d+\]\s*/, ''));
+                            }
+                        });
+                        lastNotifiedCount = data.length;
+                    }
+
+                    const terminal = document.getElementById('log-terminal');
+                    if (data.length !== lastLogCount) {
+                        terminal.innerHTML = '';
+                        data.forEach(log => {
+                            const div = document.createElement('div');
+                            div.className = 'log-entry';
+                            
+                            // Color coloring for warnings
+                            if (log.includes('[!]') || log.includes('MALWARE') || log.includes('ALERT') || log.includes('DETEKSI')) {
+                                div.classList.add('alert');
+                            } else if (log.includes('[+]') || log.includes('Success')) {
+                                div.classList.add('success');
+                            }
+                            
+                            // Human readable date converter from unix [timestamp]
+                            const match = log.match(/^\[(\d+)\] (.*)/);
+                            if (match) {
+                                const timestamp = parseInt(match[1]) * 1000;
+                                const dateStr = new Date(timestamp).toLocaleTimeString();
+                                div.textContent = `[${dateStr}] ${match[2]}`;
+                            } else {
+                                div.textContent = log;
+                            }
+                            
+                            terminal.appendChild(div);
+                        });
+                        terminal.scrollTop = terminal.scrollHeight;
+                        lastLogCount = data.length;
+                    }
+                })
+                .catch(err => console.error("Error fetching logs:", err));
+        }
+
+        // Load Quarantine list
+        function loadQuarantineList() {
+            authFetch('/api/quarantine')
+                .then(res => res.json())
+                .then(data => {
+                    const tbody = document.getElementById('quarantine-tbody');
+                    tbody.innerHTML = '';
+                    
+                    if (data.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Tidak ada file terkarantina.</td></tr>`;
+                        return;
+                    }
+
+                    data.forEach(item => {
+                        const tr = document.createElement('tr');
+                        
+                        const pathCell = document.createElement('td');
+                        pathCell.textContent = item.original_path;
+                        pathCell.style.fontFamily = 'monospace';
+                        
+                        const hashCell = document.createElement('td');
+                        hashCell.textContent = item.hash_sha256.substring(0, 16) + '...';
+                        hashCell.title = item.hash_sha256;
+                        hashCell.style.fontFamily = 'monospace';
+                        
+                        const ruleCell = document.createElement('td');
+                        ruleCell.textContent = item.triggered_rule_id;
+                        
+                        const actionCell = document.createElement('td');
+                        actionCell.className = 'actions-cell';
+                        
+                        const restoreBtn = document.createElement('button');
+                        restoreBtn.className = 'btn';
+                        restoreBtn.textContent = 'Pulihkan';
+                        restoreBtn.onclick = () => restoreQuarantine(item.id);
+                        
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.className = 'btn btn-danger';
+                        deleteBtn.textContent = 'Hapus';
+                        deleteBtn.onclick = () => deleteQuarantine(item.id);
+                        
+                        actionCell.appendChild(restoreBtn);
+                        actionCell.appendChild(deleteBtn);
+                        
+                        tr.appendChild(pathCell);
+                        tr.appendChild(hashCell);
+                        tr.appendChild(ruleCell);
+                        tr.appendChild(actionCell);
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error("Error loading quarantine:", err));
+        }
+
+        // Action API calls
+        function restoreQuarantine(id) {
+            if (confirm("Apakah Anda yakin ingin memulihkan file ini ke jalur asalnya?")) {
+                authFetch(`/api/quarantine/restore?id=${id}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert("File berhasil dipulihkan.");
+                            loadQuarantineList();
+                            fetchStatus();
+                        } else {
+                            alert("Gagal memulihkan file.");
+                        }
+                    });
+            }
+        }
+
+        function deleteQuarantine(id) {
+            if (confirm("File akan dihapus secara permanen dari sistem. Tindakan ini tidak dapat dibatalkan!")) {
+                authFetch(`/api/quarantine/delete?id=${id}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert("File dihapus secara permanen.");
+                            loadQuarantineList();
+                            fetchStatus();
+                        } else {
+                            alert("Gagal menghapus file.");
+                        }
+                    });
+            }
+        }
+
+        function quarantineScanFile(filePath, ruleId, containerElement) {
+            if (confirm(`Apakah Anda yakin ingin memindahkan berkas ini ke karantina?\nPath: ${filePath}`)) {
+                authFetch('/api/scan/action/quarantine', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: filePath, rule_id: ruleId })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        containerElement.innerHTML = 'Dikarantina';
+                        containerElement.style.color = 'var(--info)';
+                        alert("Berkas berhasil dipindahkan ke karantina.");
+                        loadQuarantineList();
+                        fetchStatus();
+                    } else {
+                        alert("Gagal mengarantina berkas: " + (data.error || "Kesalahan tidak diketahui"));
+                    }
+                })
+                .catch(err => alert("Kesalahan koneksi: " + err.message));
+            }
+        }
+
+        function whitelistScanFile(filePath, containerElement) {
+            if (confirm(`Apakah Anda yakin ingin mengecualikan (whitelist) berkas ini?\nBerkas ini tidak akan dipindai lagi di masa mendatang.\nPath: ${filePath}`)) {
+                authFetch('/api/scan/action/whitelist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: filePath })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        containerElement.innerHTML = 'Di-whitelist';
+                        containerElement.style.color = 'var(--info)';
+                        alert("Berkas berhasil ditambahkan ke whitelist.");
+                        fetchStatus();
+                    } else {
+                        alert("Gagal menambahkan ke whitelist: " + (data.error || "Kesalahan tidak diketahui"));
+                    }
+                })
+                .catch(err => alert("Kesalahan koneksi: " + err.message));
+            }
+        }
+
+        function deleteScanFile(filePath, containerElement) {
+            if (confirm(`Apakah Anda yakin ingin menghapus berkas ini secara permanen?\nTindakan ini tidak dapat dibatalkan!\nPath: ${filePath}`)) {
+                authFetch('/api/scan/action/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: filePath })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        containerElement.innerHTML = 'Dihapus';
+                        containerElement.style.color = 'var(--primary)';
+                        alert("Berkas berhasil dihapus secara permanen.");
+                        fetchStatus();
+                    } else {
+                        alert("Gagal menghapus berkas: " + (data.error || "Kesalahan tidak diketahui"));
+                    }
+                })
+                .catch(err => alert("Kesalahan koneksi: " + err.message));
+            }
+        }
+
+        function loadNetworkConnections() {
+            authFetch('/api/network/connections')
+                .then(res => res.json())
+                .then(data => {
+                    const tbody = document.getElementById('network-tbody');
+                    tbody.innerHTML = '';
+                    if (data.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Tidak ada koneksi TCP aktif.</td></tr>`;
+                        return;
+                    }
+                    data.forEach(conn => {
+                        const tr = document.createElement('tr');
+                        
+                        const procCell = document.createElement('td');
+                        const pidText = conn.pid ? `(PID: ${conn.pid})` : '';
+                        const nameText = conn.process_name ? conn.process_name.split('/').pop() : 'Unknown';
+                        procCell.textContent = `${nameText} ${pidText}`;
+                        procCell.title = conn.process_name || '';
+                        
+                        const localCell = document.createElement('td');
+                        localCell.textContent = `${conn.local_ip}:${conn.local_port}`;
+                        localCell.style.fontFamily = 'monospace';
+                        
+                        const remoteCell = document.createElement('td');
+                        remoteCell.textContent = `${conn.remote_ip}:${conn.remote_port}`;
+                        remoteCell.style.fontFamily = 'monospace';
+                        
+                        const stateCell = document.createElement('td');
+                        stateCell.textContent = conn.state;
+                        
+                        const actionCell = document.createElement('td');
+                        const blockBtn = document.createElement('button');
+                        blockBtn.className = 'btn btn-danger';
+                        blockBtn.style.padding = '0.2rem 0.5rem';
+                        blockBtn.style.fontSize = '0.8rem';
+                        blockBtn.textContent = 'Blokir IP';
+                        blockBtn.onclick = () => blockIpAddress(conn.remote_ip);
+                        actionCell.appendChild(blockBtn);
+                        
+                        tr.appendChild(procCell);
+                        tr.appendChild(localCell);
+                        tr.appendChild(remoteCell);
+                        tr.appendChild(stateCell);
+                        tr.appendChild(actionCell);
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error("Error loading network connections:", err));
+        }
+
+        function loadBlockedIps() {
+            authFetch('/api/network/blocked')
+                .then(res => res.json())
+                .then(data => {
+                    const tbody = document.getElementById('blocked-tbody');
+                    tbody.innerHTML = '';
+                    if (data.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">Tidak ada IP yang sedang diblokir di firewall.</td></tr>`;
+                        return;
+                    }
+                    data.forEach(ip => {
+                        const tr = document.createElement('tr');
+                        
+                        const ipCell = document.createElement('td');
+                        ipCell.textContent = ip;
+                        ipCell.style.fontFamily = 'monospace';
+                        
+                        const actionCell = document.createElement('td');
+                        const unblockBtn = document.createElement('button');
+                        unblockBtn.className = 'btn';
+                        unblockBtn.style.padding = '0.2rem 0.5rem';
+                        unblockBtn.style.fontSize = '0.8rem';
+                        unblockBtn.textContent = 'Buka Blokir';
+                        unblockBtn.onclick = () => unblockIpAddress(ip);
+                        actionCell.appendChild(unblockBtn);
+                        
+                        tr.appendChild(ipCell);
+                        tr.appendChild(actionCell);
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error("Error loading blocked IPs:", err));
+        }
+
+        function blockIpAddress(ip) {
+            if (confirm(`Apakah Anda yakin ingin memblokir IP ${ip}?`)) {
+                authFetch(`/api/network/block?ip=${ip}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert(`IP ${ip} berhasil diblokir.`);
+                            loadNetworkConnections();
+                            loadBlockedIps();
+                            fetchLogs();
+                        } else {
+                            alert(`Gagal memblokir IP: ${data.error || 'Terjadi kesalahan'}`);
+                        }
+                    });
+            }
+        }
+
+        function unblockIpAddress(ip) {
+            if (confirm(`Apakah Anda yakin ingin membuka blokir IP ${ip}?`)) {
+                authFetch(`/api/network/unblock?ip=${ip}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert(`IP ${ip} berhasil dibuka blokirnya.`);
+                            loadNetworkConnections();
+                            loadBlockedIps();
+                            fetchLogs();
+                        } else {
+                            alert(`Gagal membuka blokir IP: ${data.error || 'Terjadi kesalahan'}`);
+                        }
+                    });
+            }
+        }
+
+        function shutdownApp() {
+            if (confirm("Apakah Anda yakin ingin mematikan FerroShield? Layanan pemantauan real-time akan dihentikan.")) {
+                authFetch('/api/shutdown', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        alert("FerroShield sedang dimatikan. Halaman ini tidak akan aktif lagi.");
+                    })
+                    .catch(err => {
+                        alert("FerroShield telah dimatikan.");
+                    });
+            }
+        }
+
+        let scanPollInterval = null;
+
+        function updateScanControls(status) {
+            const pauseBtn = document.getElementById('pause-scan-btn');
+            const resumeBtn = document.getElementById('resume-scan-btn');
+            const stopBtn = document.getElementById('stop-scan-btn');
+            const resetBtn = document.getElementById('reset-scan-btn');
+            const loader = document.getElementById('scan-loader');
+            const startBtn = document.getElementById('start-scan-btn');
+
+            if (status === "scanning" || status === "counting") {
+                pauseBtn.style.display = 'inline-flex';
+                resumeBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-flex';
+                resetBtn.style.display = 'none';
+                loader.style.display = 'block';
+                startBtn.disabled = true;
+            } else if (status === "paused") {
+                pauseBtn.style.display = 'none';
+                resumeBtn.style.display = 'inline-flex';
+                stopBtn.style.display = 'inline-flex';
+                resetBtn.style.display = 'none';
+                loader.style.display = 'none';
+                startBtn.disabled = true;
+            } else if (status === "stopped") {
+                pauseBtn.style.display = 'none';
+                resumeBtn.style.display = 'inline-flex';
+                stopBtn.style.display = 'none';
+                resetBtn.style.display = 'inline-flex';
+                loader.style.display = 'none';
+                startBtn.disabled = true;
+            } else {
+                pauseBtn.style.display = 'none';
+                resumeBtn.style.display = 'none';
+                stopBtn.style.display = 'none';
+                resetBtn.style.display = 'none';
+                loader.style.display = 'none';
+                startBtn.disabled = false;
+            }
+        }
+
+        function displayScanResults(data, deleteChecked) {
+            const tbody = document.getElementById('scan-results-tbody');
+            const summary = document.getElementById('scan-summary-badge');
+            const resultsContainer = document.getElementById('scan-results-container');
+            
+            tbody.innerHTML = '';
+            if (data.length === 0) {
+                summary.textContent = 'Aman';
+                summary.style.backgroundColor = 'var(--primary)';
+                summary.style.color = 'var(--bg-color)';
+                tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">Jalur aman. Tidak ada ancaman terdeteksi.</td></tr>`;
+            } else {
+                summary.textContent = `Ditemukan ${data.length} Ancaman`;
+                summary.style.backgroundColor = 'var(--alert)';
+                summary.style.color = '#fff';
+
+                notifyThreat(`Pemindaian selesai: ditemukan ${data.length} file mencurigakan. Lihat hasil di dashboard.`);
+
+                data.forEach(item => {
+                    const tr = document.createElement('tr');
+                    
+                    const fileTd = document.createElement('td');
+                    fileTd.textContent = item.file_path;
+                    fileTd.style.fontFamily = 'monospace';
+
+                    const ruleTd = document.createElement('td');
+                    ruleTd.textContent = item.rules.join(', ');
+                    ruleTd.style.color = 'var(--alert)';
+                    ruleTd.style.fontWeight = '600';
+
+                    const actionTd = document.createElement('td');
+                    if (deleteChecked) {
+                        actionTd.textContent = 'Dihapus Permanen';
+                        actionTd.style.color = 'var(--primary)';
+                    } else {
+                        const btnContainer = document.createElement('div');
+                        btnContainer.style.display = 'flex';
+                        btnContainer.style.gap = '0.5rem';
+                        
+                        const qBtn = document.createElement('button');
+                        qBtn.className = 'btn';
+                        qBtn.style.padding = '0.2rem 0.5rem';
+                        qBtn.style.fontSize = '0.8rem';
+                        qBtn.textContent = 'Karantina';
+                        const firstRuleId = (item.rule_ids && item.rule_ids.length > 0) ? item.rule_ids[0] : 'HEURISTIC-ENTROPY';
+                        qBtn.onclick = () => quarantineScanFile(item.file_path, firstRuleId, actionTd);
+                        
+                        const wBtn = document.createElement('button');
+                        wBtn.className = 'btn btn-secondary';
+                        wBtn.style.padding = '0.2rem 0.5rem';
+                        wBtn.style.fontSize = '0.8rem';
+                        wBtn.textContent = 'Whitelist';
+                        wBtn.onclick = () => whitelistScanFile(item.file_path, actionTd);
+                        
+                        const dBtn = document.createElement('button');
+                        dBtn.className = 'btn btn-danger';
+                        dBtn.style.padding = '0.2rem 0.5rem';
+                        dBtn.style.fontSize = '0.8rem';
+                        dBtn.textContent = 'Hapus';
+                        dBtn.onclick = () => deleteScanFile(item.file_path, actionTd);
+                        
+                        btnContainer.appendChild(qBtn);
+                        btnContainer.appendChild(wBtn);
+                        btnContainer.appendChild(dBtn);
+                        actionTd.appendChild(btnContainer);
+                    }
+                    
+                    tr.appendChild(fileTd);
+                    tr.appendChild(ruleTd);
+                    tr.appendChild(actionTd);
+                    tbody.appendChild(tr);
+                });
+            }
+            resultsContainer.style.display = 'block';
+        }
+
+        function startPollingProgress(deleteChecked) {
+            const loader = document.getElementById('scan-loader');
+            const startBtn = document.getElementById('start-scan-btn');
+            const progressContainer = document.getElementById('scan-progress-container');
+            const progressStatus = document.getElementById('scan-progress-status');
+            const progressPercentage = document.getElementById('scan-progress-percentage');
+            const progressBar = document.getElementById('scan-progress-bar');
+            const progressFile = document.getElementById('scan-progress-file');
+
+            if (scanPollInterval) clearInterval(scanPollInterval);
+            
+            scanPollInterval = setInterval(() => {
+                authFetch('/api/scan/progress')
+                    .then(res => res.json())
+                    .then(prog => {
+                        updateScanControls(prog.status);
+                        if (prog.status === "counting") {
+                            progressStatus.textContent = "Menghitung total berkas...";
+                            progressPercentage.textContent = "0%";
+                            progressBar.style.width = "0%";
+                            progressFile.textContent = "Menganalisis struktur direktori...";
+                        } else if (prog.status === "scanning") {
+                            const percent = prog.total_files > 0 ? Math.round((prog.scanned_files / prog.total_files) * 100) : 0;
+                            progressStatus.textContent = `Memindai: ${prog.scanned_files} / ${prog.total_files} berkas`;
+                            progressPercentage.textContent = `${percent}%`;
+                            progressBar.style.width = `${percent}%`;
+                            progressFile.textContent = `File: ${prog.current_file}`;
+                        } else if (prog.status === "paused") {
+                            const percent = prog.total_files > 0 ? Math.round((prog.scanned_files / prog.total_files) * 100) : 0;
+                            progressStatus.textContent = `Dijeda: ${prog.scanned_files} / ${prog.total_files} berkas`;
+                            progressPercentage.textContent = `${percent}%`;
+                            progressBar.style.width = `${percent}%`;
+                            progressFile.textContent = `File terakhir: ${prog.current_file}`;
+                        } else if (prog.status === "stopped") {
+                            clearInterval(scanPollInterval);
+                            const percent = prog.total_files > 0 ? Math.round((prog.scanned_files / prog.total_files) * 100) : 0;
+                            progressStatus.textContent = `Diberhentikan: ${prog.scanned_files} / ${prog.total_files} berkas`;
+                            progressPercentage.textContent = `${percent}%`;
+                            progressBar.style.width = `${percent}%`;
+                            progressFile.textContent = "Pemindaian dihentikan oleh pengguna.";
+                        } else if (prog.status === "completed") {
+                            clearInterval(scanPollInterval);
+                            loader.style.display = 'none';
+                            startBtn.disabled = false;
+                            progressContainer.style.display = 'none';
+                            
+                            displayScanResults(prog.results, deleteChecked);
+                            fetchStatus();
+                        } else if (prog.status === "error") {
+                            clearInterval(scanPollInterval);
+                            alert("Terjadi kesalahan: " + prog.error);
+                            resetScanUI();
+                        }
+                    })
+                    .catch(err => {
+                        clearInterval(scanPollInterval);
+                        console.error("Error polling progress:", err);
+                        resetScanUI();
+                    });
+            }, 300);
+
+            function resetScanUI() {
+                loader.style.display = 'none';
+                startBtn.disabled = false;
+                progressContainer.style.display = 'none';
+                updateScanControls('idle');
+            }
+        }
+
+        // Trigger manual scan from UI
+        function triggerScan() {
+            const path = document.getElementById('scan-path-input').value.trim();
+            const deleteChecked = document.getElementById('scan-delete-checkbox').checked;
+            
+            if (!path) {
+                alert("Mohon masukkan path direktori atau file terlebih dahulu.");
+                return;
+            }
+
+            const loader = document.getElementById('scan-loader');
+            const startBtn = document.getElementById('start-scan-btn');
+            const resultsContainer = document.getElementById('scan-results-container');
+            const progressContainer = document.getElementById('scan-progress-container');
+            const progressStatus = document.getElementById('scan-progress-status');
+            const progressPercentage = document.getElementById('scan-progress-percentage');
+            const progressBar = document.getElementById('scan-progress-bar');
+            const progressFile = document.getElementById('scan-progress-file');
+
+            loader.style.display = 'block';
+            startBtn.disabled = true;
+            resultsContainer.style.display = 'none';
+            progressContainer.style.display = 'block';
+            
+            progressStatus.textContent = "Menghubungkan ke pemindai...";
+            progressPercentage.textContent = "0%";
+            progressBar.style.width = "0%";
+            progressFile.textContent = "File: -";
+            updateScanControls('counting');
+
+            authFetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, delete: deleteChecked })
+            })
+            .then(res => {
+                if (!res.ok) {
+                    return res.json().then(json => { throw new Error(json.error || "Gagal memulai scan"); });
+                }
+                return res.json();
+            })
+            .then(data => {
+                startPollingProgress(deleteChecked);
+            })
+            .catch(err => {
+                alert(err.message);
+                loader.style.display = 'none';
+                startBtn.disabled = false;
+                progressContainer.style.display = 'none';
+                updateScanControls('idle');
+            });
+        }
+
+        function pauseScan() {
+            authFetch('/api/scan/pause', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        alert("Gagal menjeda: " + data.error);
+                    }
+                })
+                .catch(err => console.error("Error pausing scan:", err));
+        }
+
+        function resumeScan() {
+            authFetch('/api/scan/progress')
+                .then(res => res.json())
+                .then(prog => {
+                    if (prog.status === "stopped") {
+                        const path = document.getElementById('scan-path-input').value.trim();
+                        const deleteChecked = document.getElementById('scan-delete-checkbox').checked;
+                        
+                        const loader = document.getElementById('scan-loader');
+                        const startBtn = document.getElementById('start-scan-btn');
+                        loader.style.display = 'block';
+                        startBtn.disabled = true;
+                        
+                        authFetch('/api/scan', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: path, delete: deleteChecked, resume: true })
+                        })
+                        .then(res => {
+                            if (!res.ok) {
+                                return res.json().then(json => { throw new Error(json.error || "Gagal melanjutkan scan"); });
+                            }
+                            return res.json();
+                        })
+                        .then(data => {
+                            startPollingProgress(deleteChecked);
+                        })
+                        .catch(err => {
+                            alert(err.message);
+                            loader.style.display = 'none';
+                        });
+                    } else {
+                        authFetch('/api/scan/resume', { method: 'POST' })
+                            .then(res => res.json())
+                            .then(data => {
+                                if (data.error) {
+                                    alert("Gagal melanjutkan: " + data.error);
+                                }
+                            })
+                            .catch(err => console.error("Error resuming scan:", err));
+                    }
+                });
+        }
+
+        function stopScan() {
+            if (confirm("Apakah Anda yakin ingin menghentikan pemindaian?")) {
+                authFetch('/api/scan/stop', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert("Gagal menghentikan: " + data.error);
+                        }
+                    })
+                    .catch(err => console.error("Error stopping scan:", err));
+            }
+        }
+
+        function resetScan() {
+            authFetch('/api/scan/reset', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('scan-progress-container').style.display = 'none';
+                    document.getElementById('start-scan-btn').disabled = false;
+                    updateScanControls('idle');
+                })
+                .catch(err => {
+                    console.error("Error resetting scan:", err);
+                    document.getElementById('scan-progress-container').style.display = 'none';
+                    document.getElementById('start-scan-btn').disabled = false;
+                    updateScanControls('idle');
+                });
+        }
+
+        function checkActiveScan() {
+            authFetch('/api/scan/progress')
+                .then(res => res.json())
+                .then(prog => {
+                    const pathInput = document.getElementById('scan-path-input');
+                    if (prog.target_path) {
+                        pathInput.value = prog.target_path;
+                    }
+                    
+                    if (prog.status === "scanning" || prog.status === "counting" || prog.status === "paused") {
+                        const progressContainer = document.getElementById('scan-progress-container');
+                        const progressStatus = document.getElementById('scan-progress-status');
+                        const progressPercentage = document.getElementById('scan-progress-percentage');
+                        const progressBar = document.getElementById('scan-progress-bar');
+                        const progressFile = document.getElementById('scan-progress-file');
+                        
+                        progressContainer.style.display = 'block';
+                        updateScanControls(prog.status);
+                        
+                        if (prog.status === "counting") {
+                            progressStatus.textContent = "Menghitung total berkas...";
+                            progressPercentage.textContent = "0%";
+                            progressBar.style.width = "0%";
+                            progressFile.textContent = "Menganalisis struktur direktori...";
+                        } else {
+                            const percent = prog.total_files > 0 ? Math.round((prog.scanned_files / prog.total_files) * 100) : 0;
+                            progressStatus.textContent = `${prog.status === "paused" ? "Dijeda" : "Memindai"}: ${prog.scanned_files} / ${prog.total_files} berkas`;
+                            progressPercentage.textContent = `${percent}%`;
+                            progressBar.style.width = `${percent}%`;
+                            progressFile.textContent = `File: ${prog.current_file}`;
+                        }
+                        
+                        startPollingProgress(false);
+                    } else if (prog.status === "stopped") {
+                        const progressContainer = document.getElementById('scan-progress-container');
+                        const progressStatus = document.getElementById('scan-progress-status');
+                        const progressPercentage = document.getElementById('scan-progress-percentage');
+                        const progressBar = document.getElementById('scan-progress-bar');
+                        const progressFile = document.getElementById('scan-progress-file');
+
+                        progressContainer.style.display = 'block';
+                        updateScanControls('stopped');
+
+                        const percent = prog.total_files > 0 ? Math.round((prog.scanned_files / prog.total_files) * 100) : 0;
+                        progressStatus.textContent = `Diberhentikan: ${prog.scanned_files} / ${prog.total_files} berkas`;
+                        progressPercentage.textContent = `${percent}%`;
+                        progressBar.style.width = `${percent}%`;
+                        progressFile.textContent = "Pemindaian dihentikan oleh pengguna.";
+                    } else if (prog.status === "completed" && prog.results && prog.results.length > 0) {
+                        displayScanResults(prog.results, false);
+                    }
+                });
+        }
+
+        // Polling background updates
+        setInterval(fetchStatus, 2000);
+        setInterval(fetchLogs, 1500);
+        setInterval(() => {
+            if (document.getElementById('view-network').classList.contains('active')) {
+                loadNetworkConnections();
+                loadBlockedIps();
+            }
+        }, 5000);
+        
+        // Initial load
+        requestNotificationPermission();
+        fetchStatus();
+        fetchLogs();
+        checkActiveScan();
+    </script>
+</body>
+</html>

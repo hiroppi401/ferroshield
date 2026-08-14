@@ -1,0 +1,50 @@
+[Unit]
+Description=FerroShield Malware Scanner & Browser Guard Daemon
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=30s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/ferroshield
+ExecStartPre=/usr/local/bin/ferroshield block-hosts
+ExecStart=/usr/local/bin/ferroshield monitor
+User=root
+
+# Restart Policy
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ferroshield
+
+# Resource Limits
+MemoryMax=512M
+CPUQuota=30%
+TasksMax=50
+
+# Capability Hardening
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_BPF CAP_PERFMON CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_DAC_OVERRIDE CAP_BPF CAP_PERFMON CAP_SYS_ADMIN
+NoNewPrivileges=true
+
+# Sandbox Hardening
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/etc/hosts /etc/ferroshield /var/lib/ferroshield
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

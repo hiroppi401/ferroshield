@@ -1,0 +1,4 @@
+{
+  "default_action": "quarantine",
+  "downloads_dir": "/home/user/Downloads"
+}

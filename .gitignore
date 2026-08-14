@@ -1,0 +1,20 @@
+/target
+/target/**/*.rs.bk
+
+# Secrets & runtime state (must never be committed)
+rules.key
+rules.pub
+config.json
+whitelist.json
+scan_state.json
+*.sig
+ferroshield.log
+*.pid
+dashboard.crt
+dashboard.key
+
+# Local data
+.quarantine/
+
+# Build artifacts
+/dist/
