@@ -19,3 +19,6 @@ dashboard.token
 
 # Build artifacts
 /dist/
+
+# Chrome-generated cache when loading the unpacked extension
+extension/_metadata/

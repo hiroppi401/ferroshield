@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Diblokir - FerroShield</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+      background: radial-gradient(ellipse at top, #2a0e14 0%, #14080c 55%, #0b0508 100%);
+      color: #f2e9e6;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      max-width: 620px;
+      width: 100%;
+      background: rgba(40, 16, 20, 0.72);
+      border: 1px solid rgba(255, 90, 90, 0.28);
+      border-radius: 18px;
+      padding: 36px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    }
+    .shield {
+      width: 72px; height: 72px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 50%;
+      background: rgba(239, 68, 68, 0.16);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      margin-bottom: 20px;
+    }
+    .shield svg { width: 44px; height: 44px; }
+    h1 { font-size: 26px; font-weight: 700; letter-spacing: 0.2px; }
+    .badge {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(239, 68, 68, 0.18);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #ffb4a7;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .url-box {
+      margin-top: 22px;
+      padding: 14px 16px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      font-family: 'Cascadia Code', 'JetBrains Mono', monospace;
+      font-size: 13px;
+      word-break: break-all;
+      color: #ffd9d3;
+    }
+    .reason { margin-top: 16px; font-size: 14px; line-height: 1.6; color: #e6b8b1; }
+    .hint { margin-top: 16px; font-size: 12.5px; line-height: 1.6; color: #9c8b88; }
+    .actions { margin-top: 28px; display: flex; gap: 12px; flex-wrap: wrap; }
+    button {
+      flex: 1;
+      min-width: 160px;
+      padding: 13px 18px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .back { background: rgba(255,255,255,0.08); color: #f2e9e6; border-color: rgba(255,255,255,0.18); }
+    .back:hover { background: rgba(255,255,255,0.16); }
+    .proceed { background: #d13c3c; color: #fff; }
+    .proceed:hover { background: #e04848; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="shield">
+      <svg viewBox="0 0 128 128" fill="none">
+        <path d="M64 8 L112 28 V68 C112 96 92 114 64 122 C36 114 16 96 16 68 V28 Z"
+              fill="#ef4444" fill-opacity="0.85"/>
+        <path d="M64 38 V78" stroke="#fff" stroke-width="11" stroke-linecap="round"/>
+        <circle cx="64" cy="94" r="6.5" fill="#fff"/>
+      </svg>
+    </div>
+    <span class="badge" id="category">Terblokir</span>
+    <h1>FerroShield menghentikan akses</h1>
+    <div class="url-box" id="url"></div>
+    <p class="reason" id="reason"></p>
+    <p class="hint">
+      Halaman ini diblokir oleh FerroShield Browser Guard. Jika Anda yakin ini
+      kesalahan, Anda dapat melewati peringatan untuk sesi ini. Halaman peringatan
+      tidak pernah memuat konten situs asli.
+    </p>
+    <div class="actions">
+      <button class="back" id="back">Kembali</button>
+      <button class="proceed" id="proceed">Lewati &amp; lanjutkan (risiko)</button>
+    </div>
+  </div>
+  <script src="warning.js"></script>
+</body>
+</html>

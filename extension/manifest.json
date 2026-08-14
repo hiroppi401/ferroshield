@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "FerroShield Browser Guard",
+  "version": "0.1.0",
+  "description": "Lapisan keamanan cyber tambahan untuk daemon FerroShield: blokir domain blacklist via daemon lokal, heuristik phishing/scam, dan blokir web miner.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "webNavigation",
+    "declarativeNetRequest",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8686/*",
+    "http://localhost:8686/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["lib/phishing.js", "background.js"],
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FerroShield Browser Guard",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "miner_rules",
+        "enabled": true,
+        "path": "rules/miner.json"
+      }
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ferroshield-browser-guard@ferroshield.app",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  }
+}

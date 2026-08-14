@@ -221,6 +221,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=$CONF_DIR
+TimeoutStartSec=90s
 ExecStartPre=$BINARY block-hosts
 ExecStart=$BINARY monitor
 User=root
@@ -391,6 +392,7 @@ uninstall() {
     purge_firewall_rules
     rm -rf "$LIB_DIR" "$CONF_DIR" "$VAR_DIR"
     rm -f "$BINARY"
+    rm -rf /sys/fs/cgroup/ferroshield
     ok "FerroShield berhasil dihapus."
 }
 

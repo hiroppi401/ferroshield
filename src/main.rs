@@ -109,6 +109,25 @@ fn main() {
             }
             return;
         }
+        "block-hosts" => {
+            let rules_config = match load_rules("rules.json") {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("[-] Gagal memuat rules.json: {}", e);
+                    eprintln!("[-] Pastikan file rules.json berada di direktori yang sama.");
+                    return;
+                }
+            };
+            println!("[*] Memproses blacklist domain ke /etc/hosts...");
+            let domains = &rules_config.network_blacklist.domains;
+            if let Err(e) = browser::block_domains_in_hosts(domains) {
+                eprintln!("[-] Gagal menulis ke /etc/hosts: {}", e);
+                eprintln!("[-] Anda perlu menjalankan perintah ini sebagai root/sudo.");
+            } else {
+                println!("[+] Semua domain berbahaya berhasil dialihkan ke 127.0.0.1.");
+            }
+            return;
+        }
         "quarantine" => {
             if args.len() < 3 {
                 println!("[-] Gunakan: ferroshield quarantine [list|restore|delete]");
@@ -862,16 +881,6 @@ fn main() {
             // Keep the main thread alive for the web server thread
             loop {
                 thread::sleep(Duration::from_secs(3600));
-            }
-        }
-        "block-hosts" => {
-            println!("[*] Memproses blacklist domain ke /etc/hosts...");
-            let domains = &rules_config.network_blacklist.domains;
-            if let Err(e) = browser::block_domains_in_hosts(domains) {
-                eprintln!("[-] Gagal menulis ke /etc/hosts: {}", e);
-                eprintln!("[-] Anda perlu menjalankan perintah ini sebagai root/sudo.");
-            } else {
-                println!("[+] Semua domain berbahaya berhasil dialihkan ke 127.0.0.1.");
             }
         }
         "clean-hosts" => {

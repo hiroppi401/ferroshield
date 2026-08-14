@@ -11,11 +11,14 @@ use std::io::{self, BufRead};
 use std::path::Path;
 use std::process::Child;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
+
+use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 pub static SCAN_THREAD_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -120,6 +123,14 @@ struct StatusResponse {
     quarantine_count: usize,
     log_count: usize,
     action: String,
+}
+
+#[derive(Serialize)]
+struct UrlCheckResponse {
+    blocked: bool,
+    category: Option<String>,
+    matched: Option<String>,
+    reason: Option<String>,
 }
 
 const DASHBOARD_TOKEN_FILE: &str = "dashboard.token";
@@ -890,6 +901,32 @@ fn handle_request(
                 .with_header(json_header))
         }
         _ => {
+            // Read-only lookup used by the FerroShield browser extension: the
+            // daemon decides whether a URL's host (and resolved IPs) belongs to
+            // the signed blacklist, so the extension never needs the raw list.
+            if url.starts_with("/api/url/check") && method == &Method::Get {
+                let target = get_query_param(url, "url")
+                    .ok_or_else(|| "Missing url parameter".to_string())?;
+                let verdict = check_url_against_blacklist(&target, ctx.rules_config);
+                let body = serde_json::to_string(&verdict).map_err(|e| e.to_string())?;
+                return Ok(Response::from_string(body)
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header));
+            }
+
+            // Full domain blacklist snapshot for the extension's dynamic
+            // declarativeNetRequest sync (network-level blocking of subresources).
+            if url.starts_with("/api/blacklist/domains") && method == &Method::Get {
+                let body = format!(
+                    "{{\"domains\": {}}}",
+                    serde_json::to_string(&ctx.rules_config.network_blacklist.domains)
+                        .map_err(|e| e.to_string())?
+                );
+                return Ok(Response::from_string(body)
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header));
+            }
+
             // Check query params endpoints like /api/quarantine/restore?id=xxx
             if url.starts_with("/api/quarantine/restore") && method == &Method::Post {
                 let id =
@@ -1000,6 +1037,163 @@ fn get_query_param(url: &str, param_name: &str) -> Option<String> {
     None
 }
 
+/// Extracts the lowercase hostname from a URL string without pulling in the
+/// `url` crate. Handles scheme, userinfo, port, IPv6 brackets, path, query,
+/// and fragment. Returns `None` when no usable hostname is present.
+fn extract_host(url: &str) -> Option<String> {
+    let s = url.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Strip fragment, then query.
+    let s = s.split('#').next().unwrap_or("");
+    let s = s.split('?').next().unwrap_or("");
+    // Find the authority after the scheme (://).
+    let authority = match s.find("://") {
+        Some(pos) => &s[pos + 3..],
+        None => s,
+    };
+    // Authority ends at the first '/' (path) or '\' (misparsed scheme).
+    let authority = authority
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('\\')
+        .next()
+        .unwrap_or("")
+        .trim();
+    // Strip userinfo.
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(start) = authority.find('[') {
+        // IPv6 literal: take everything inside the brackets.
+        authority[start + 1..]
+            .find(']')
+            .map(|end| &authority[start + 1..start + 1 + end])
+            .unwrap_or("")
+    } else {
+        // Strip a numeric port (colon is not valid in a hostname).
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.trim().trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_lowercase())
+}
+
+/// True when `host` equals a blacklisted domain or is a subdomain of one.
+/// Returns the matched blacklist entry. Matching is case-insensitive and
+/// anchored at label boundaries (`evil.com` blocks `sub.evil.com` but not
+/// `notevil.com`).
+fn domain_matches_blacklist(host: &str, blacklist: &[String]) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_lowercase();
+    for domain in blacklist {
+        let d = domain.trim().trim_end_matches('.').to_lowercase();
+        if d.is_empty() || !d.contains('.') {
+            continue;
+        }
+        if host == d || host.ends_with(&format!(".{}", d)) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+type DnsCache = Mutex<HashMap<String, (Vec<String>, Instant)>>;
+
+/// Short-lived cache of resolved IPs to avoid blocking the HTTP thread on DNS
+/// for every navigation. Keyed by hostname, entries expire after 10 minutes.
+fn dns_cache() -> &'static DnsCache {
+    static CACHE: OnceLock<DnsCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const DNS_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// Resolves a hostname to its IPv4/IPv6 addresses with a bounded timeout so a
+/// slow DNS lookup never stalls the web server. Returns an empty vec on error.
+fn resolve_ips(host: &str) -> Vec<String> {
+    if let Ok(cache) = dns_cache().lock()
+        && let Some((ips, at)) = cache.get(host)
+        && at.elapsed() < DNS_CACHE_TTL
+    {
+        return ips.clone();
+    }
+    let host_key = host.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut ips = Vec::new();
+        if let Ok(addrs) = (host_key.as_str(), 80u16).to_socket_addrs() {
+            for addr in addrs {
+                let ip = addr.ip().to_string();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+        let _ = tx.send(ips);
+    });
+    let ips = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    if let Ok(mut cache) = dns_cache().lock() {
+        cache.insert(host.to_string(), (ips.clone(), Instant::now()));
+        if cache.len() > 2048 {
+            let now = Instant::now();
+            cache.retain(|_, (_, at)| now.duration_since(*at) < DNS_CACHE_TTL);
+        }
+    }
+    ips
+}
+
+/// Evaluates a full URL against the signed network blacklist (domains first,
+/// then IPs resolved from the hostname). Used by the browser extension's
+/// `/api/url/check` endpoint.
+fn check_url_against_blacklist(url: &str, rules: &RulesConfig) -> UrlCheckResponse {
+    let Some(host) = extract_host(url) else {
+        return UrlCheckResponse {
+            blocked: false,
+            category: None,
+            matched: None,
+            reason: None,
+        };
+    };
+
+    if let Some(matched) = domain_matches_blacklist(&host, &rules.network_blacklist.domains) {
+        return UrlCheckResponse {
+            blocked: true,
+            category: Some("domain".to_string()),
+            matched: Some(matched),
+            reason: Some(
+                "Domain terdaftar di blacklist FerroShield (threat feed URLhaus / aturan lokal)."
+                    .to_string(),
+            ),
+        };
+    }
+
+    // The daemon's network monitor already kills processes that connect to
+    // blacklisted IPs; this is a browser-side early warning layer for hosts
+    // that resolve to such IPs.
+    for ip in resolve_ips(&host) {
+        if rules.network_blacklist.ips.contains(&ip) {
+            return UrlCheckResponse {
+                blocked: true,
+                category: Some("ip".to_string()),
+                matched: Some(ip),
+                reason: Some(
+                    "Resolusi DNS host menunjuk ke IP yang diblokir FerroShield (threat feed Feodo)."
+                        .to_string(),
+                ),
+            };
+        }
+    }
+
+    UrlCheckResponse {
+        blocked: false,
+        category: None,
+        matched: None,
+        reason: None,
+    }
+}
+
 /// Returns the `Host` header value without the port, lowercased.
 fn request_host(request: &tiny_http::Request) -> Option<String> {
     request
@@ -1092,6 +1286,95 @@ mod tests {
             .unwrap_or("0")
             .parse()
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_extract_host_parses_urls() {
+        assert_eq!(
+            extract_host("https://evil.com/path?q=1#frag"),
+            Some("evil.com".to_string())
+        );
+        assert_eq!(
+            extract_host("http://sub.EVIL.COM:8080/x"),
+            Some("sub.evil.com".to_string())
+        );
+        assert_eq!(
+            extract_host("https://user:pass@example.net:443/a"),
+            Some("example.net".to_string())
+        );
+        assert_eq!(
+            extract_host("https://[::1]:8443/x"),
+            Some("::1".to_string())
+        );
+        assert_eq!(
+            extract_host("http://192.168.1.5"),
+            Some("192.168.1.5".to_string())
+        );
+        assert_eq!(
+            extract_host("127.0.0.1:8686/api/status"),
+            Some("127.0.0.1".to_string())
+        );
+        assert_eq!(extract_host(""), None);
+        assert_eq!(extract_host("http:///path"), None);
+    }
+
+    #[test]
+    fn test_domain_matches_blacklist_anchors_labels() {
+        let blacklist = vec!["evil.com".to_string(), "bad.example.net".to_string()];
+        assert_eq!(
+            domain_matches_blacklist("evil.com", &blacklist),
+            Some("evil.com".to_string())
+        );
+        assert_eq!(
+            domain_matches_blacklist("sub.evil.com", &blacklist),
+            Some("evil.com".to_string())
+        );
+        assert_eq!(
+            domain_matches_blacklist("EVIL.COM", &blacklist),
+            Some("evil.com".to_string())
+        );
+        assert_eq!(
+            domain_matches_blacklist("deep.a.bad.example.net", &blacklist),
+            Some("bad.example.net".to_string())
+        );
+        // Label boundary: "notevil.com" must NOT match "evil.com".
+        assert_eq!(domain_matches_blacklist("notevil.com", &blacklist), None);
+        assert_eq!(
+            domain_matches_blacklist("evil.com.evil.org", &blacklist),
+            None
+        );
+        // Trailing dot normalized.
+        assert_eq!(
+            domain_matches_blacklist("sub.evil.com.", &blacklist),
+            Some("evil.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_url_against_blacklist() {
+        let config = RulesConfig {
+            settings: None,
+            rules: Vec::new(),
+            network_blacklist: crate::config::NetworkBlacklist {
+                ips: vec!["185.112.146.12".to_string()],
+                domains: vec!["malicious-miner-pool.com".to_string()],
+            },
+            ebpf_sha256: None,
+            rules_yar_sha256: None,
+        };
+        let hit =
+            check_url_against_blacklist("https://www.malicious-miner-pool.com/pool?a=1", &config);
+        assert!(hit.blocked);
+        assert_eq!(hit.category.as_deref(), Some("domain"));
+        assert_eq!(hit.matched.as_deref(), Some("malicious-miner-pool.com"));
+
+        let clean = check_url_against_blacklist("https://example.org", &config);
+        assert!(!clean.blocked);
+        assert_eq!(clean.category, None);
+
+        let direct_ip = check_url_against_blacklist("http://185.112.146.12:8080/x", &config);
+        assert!(direct_ip.blocked);
+        assert_eq!(direct_ip.category.as_deref(), Some("ip"));
     }
 
     #[test]

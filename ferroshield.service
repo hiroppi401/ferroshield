@@ -8,6 +8,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/etc/ferroshield
+TimeoutStartSec=90s
 ExecStartPre=/usr/local/bin/ferroshield block-hosts
 ExecStart=/usr/local/bin/ferroshield monitor
 User=root
