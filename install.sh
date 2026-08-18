@@ -401,6 +401,15 @@ case "${1:-install}" in
     install)
         check_root
         msg "Memulai instalasi FerroShield..."
+        if [ -f "$BINARY" ] || [ -d "$LIB_DIR" ] || [ -d "$CONF_DIR" ]; then
+            warn "Instalasi FerroShield yang sudah ada terdeteksi, membersihkan terlebih dahulu..."
+            stop_service
+            clean_hosts
+            purge_firewall_rules
+            rm -rf "$LIB_DIR" "$CONF_DIR" "$VAR_DIR"
+            rm -rf /sys/fs/cgroup/ferroshield
+            ok "Instalasi lama dibersihkan."
+        fi
         build_binary
 
         mkdir -p "$BIN_DIR" "$LIB_DIR" "$CONF_DIR" "$QUARANTINE_DIR"

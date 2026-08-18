@@ -477,13 +477,50 @@ pub fn block_domains_in_hosts(domains: &[String]) -> io::Result<()> {
     let mut file = OpenOptions::new().append(true).open(hosts_path)?;
 
     for domain in domains {
-        if !blocked_set.contains(domain) {
+        if !blocked_set.contains(domain) && !crate::utils::is_whitelisted(domain) {
             println!("[!] Blocking malicious domain: {} via /etc/hosts", domain);
             writeln!(file, "127.0.0.1\t{}\t# ferroshield-block", domain)?;
         }
     }
 
     Ok(())
+}
+
+/// Removes a specific domain from `/etc/hosts` if it was blocked by FerroShield (e.g. when whitelisted)
+pub fn unblock_domain_in_hosts(domain: &str) -> io::Result<bool> {
+    let hosts_path = "/etc/hosts";
+    if !Path::new(hosts_path).exists() {
+        return Ok(false);
+    }
+    let file = fs::File::open(hosts_path)?;
+    let reader = BufReader::new(file);
+    let mut new_lines = Vec::new();
+    let mut removed = false;
+    let target = domain.trim().to_lowercase();
+
+    for line_res in reader.lines() {
+        let line = line_res?;
+        if line.contains("# ferroshield-block") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1].to_lowercase() == target {
+                removed = true;
+                continue;
+            }
+        }
+        new_lines.push(line);
+    }
+
+    if removed {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(hosts_path)?;
+        for line in new_lines {
+            writeln!(file, "{}", line)?;
+        }
+    }
+
+    Ok(removed)
 }
 
 /// Removes all ferroshield-blocked domains from `/etc/hosts`

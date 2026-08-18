@@ -502,6 +502,52 @@
             animation: spin 0.8s linear infinite;
         }
 
+        /* Badges & Tags */
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.65rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+        .badge-critical {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.35);
+        }
+        .badge-high {
+            background-color: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.35);
+        }
+        .badge-medium {
+            background-color: rgba(59, 130, 246, 0.15);
+            color: #3b82f6;
+            border: 1px solid rgba(59, 130, 246, 0.35);
+        }
+        .badge-success {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+        }
+        .badge-info {
+            background-color: rgba(14, 165, 233, 0.15);
+            color: #0ea5e9;
+            border: 1px solid rgba(14, 165, 233, 0.35);
+        }
+
+        .pagination-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 1rem;
+            padding: 0.75rem 1rem;
+            background: rgba(10, 12, 18, 0.4);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
         /* Animations */
         @keyframes pulse {
             0% { transform: scale(1); opacity: 1; }
@@ -649,6 +695,10 @@
             <a class="menu-item" onclick="switchView('network', this)">
                 <svg class="menu-icon" viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><circle cx="12" cy="20" r="1"></circle></svg>
                 <span>Jaringan</span>
+            </a>
+            <a class="menu-item" onclick="switchView('webguard', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                <span>Web Guard</span>
             </a>
         </nav>
 
@@ -826,6 +876,106 @@
                 </table>
             </div>
         </section>
+
+        <!-- VIEW: Web Guard & Blacklist -->
+        <section id="view-webguard" class="view-content">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <div>
+                    <h2 style="font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem;">Web Guard & Threat Intelligence</h2>
+                    <p style="color: var(--text-muted); font-size: 0.9rem;">Daftar domain/website berbahaya yang diblokir otomatis serta manajemen Whitelist untuk penanganan False Positive.</p>
+                </div>
+                <button class="btn" onclick="loadWebGuardDomains(true); loadWhitelistData();">Segarkan Data</button>
+            </div>
+
+            <!-- Quick Stats Web Guard -->
+            <div class="grid-stats" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 2rem;">
+                <div class="card-stat">
+                    <div class="stat-label">Total Domain Terblokir</div>
+                    <div class="stat-value" id="webguard-total-domains" style="color: var(--alert);">0</div>
+                    <div class="stat-meta">Threat Feed & Signed Rules</div>
+                </div>
+                <div class="card-stat">
+                    <div class="stat-label">Whitelist Aktif</div>
+                    <div class="stat-value" id="webguard-total-whitelist" style="color: var(--primary);">0</div>
+                    <div class="stat-meta">Dikecualikan (False Positive)</div>
+                </div>
+                <div class="card-stat">
+                    <div class="stat-label">Modul Proteksi</div>
+                    <div class="stat-value" style="font-size: 1.25rem; color: var(--info);">DNS & Extension</div>
+                    <div class="stat-meta">Sinkhole /etc/hosts + Web Extension</div>
+                </div>
+            </div>
+
+            <!-- Form Tambah Whitelist Manual -->
+            <div class="card-stat" style="width: 100%; display: block; margin-bottom: 2rem;">
+                <h3 style="font-size: 1.05rem; margin-bottom: 0.75rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    <svg style="width: 18px; height: 18px; fill: none; stroke: var(--primary); stroke-width: 2;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>
+                    Tambah Pengecualian Whitelist (False Positive)
+                </h3>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+                    Masukkan nama domain, alamat IP, atau path file yang salah terdeteksi (false positive) agar tidak diblokir oleh FerroShield.
+                </p>
+                <div class="form-row">
+                    <input type="text" id="whitelist-input" placeholder="Contoh: orienttaxtile.com, 185.112.146.12, atau /usr/local/bin/myapp">
+                    <button class="btn" style="white-space: nowrap;" onclick="addCustomWhitelist()">+ Tambah ke Whitelist</button>
+                </div>
+            </div>
+
+            <!-- Daftar Domain Terblokir dengan Pencarian & Cursor Pagination -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2rem; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 1rem;">
+                <h3 style="font-size: 1.1rem; font-weight: 600;">Daftar Domain / Website Terindikasi Ancaman</h3>
+                <div style="display: flex; gap: 0.5rem; align-items: center; max-width: 400px; width: 100%;">
+                    <input type="text" id="domain-search-input" placeholder="Cari domain, indikasi, atau sumber..." style="padding: 0.5rem 0.85rem; font-size: 0.85rem;" oninput="debounceSearchDomains()">
+                    <button class="btn btn-secondary" style="padding: 0.5rem 0.85rem; font-size: 0.85rem;" onclick="resetDomainSearch()">Reset</button>
+                </div>
+            </div>
+
+            <div class="table-container" style="margin-top: 0.5rem;">
+                <table id="webguard-domains-table">
+                    <thead>
+                        <tr>
+                            <th>Domain / Website</th>
+                            <th>Indikasi Ancaman</th>
+                            <th>Sumber Intelijen</th>
+                            <th>Tingkat Bahaya</th>
+                            <th>Status Proteksi</th>
+                            <th>Aksi (False Positive)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="webguard-domains-tbody">
+                        <!-- Dynamic Blocked Domains -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Cursor-based Pagination Bar -->
+            <div class="pagination-bar" id="webguard-pagination-bar">
+                <span id="webguard-page-info" style="font-size: 0.85rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;">
+                    Memuat data...
+                </span>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary" style="padding: 0.4rem 0.85rem; font-size: 0.8rem;" id="webguard-first-btn" onclick="loadWebGuardDomains(true)" disabled>Awal</button>
+                    <button class="btn" style="padding: 0.4rem 1rem; font-size: 0.8rem;" id="webguard-next-btn" onclick="loadNextDomains()" disabled>Muat Berikutnya (Next) &rarr;</button>
+                </div>
+            </div>
+
+            <!-- Tabel Whitelist Aktif -->
+            <h3 style="font-size: 1.1rem; margin-top: 3rem; margin-bottom: 0.75rem; font-weight: 600;">Daftar Whitelist Aktif (Diizinkan)</h3>
+            <div class="table-container" style="margin-top: 0.5rem;">
+                <table id="whitelist-table">
+                    <thead>
+                        <tr>
+                            <th>Target Whitelist (Domain / IP / Path)</th>
+                            <th>Tipe Target</th>
+                            <th>Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="whitelist-tbody">
+                        <!-- Dynamic Whitelist List -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
     </main>
 
     <!-- Toast notification container -->
@@ -907,10 +1057,17 @@
             }
         }
 
-        // Update Time display
+        // Update Time display with UTC+7 (Jakarta / WIB) timezone
         function updateTime() {
             const now = new Date();
-            document.getElementById('time-display').textContent = now.toTimeString().split(' ')[0];
+            const timeStr = new Intl.DateTimeFormat('id-ID', {
+                timeZone: 'Asia/Jakarta',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            }).format(now);
+            document.getElementById('time-display').textContent = `${timeStr} WIB`;
         }
         setInterval(updateTime, 1000);
         updateTime();
@@ -941,15 +1098,19 @@
                 'dashboard': 'Dashboard Overview',
                 'scanner': 'Malware Scanner',
                 'quarantine': 'Quarantine Vault',
-                'network': 'Network Monitor'
+                'network': 'Network Monitor',
+                'webguard': 'Web Guard & Threat Intelligence'
             };
-            document.getElementById('view-title').textContent = titles[viewName];
+            document.getElementById('view-title').textContent = titles[viewName] || 'Dashboard';
 
             if (viewName === 'quarantine') {
                 loadQuarantineList();
             } else if (viewName === 'network') {
                 loadNetworkConnections();
                 loadBlockedIps();
+            } else if (viewName === 'webguard') {
+                loadWebGuardDomains(true);
+                loadWhitelistData();
             }
         }
 
@@ -1016,12 +1177,21 @@
                                 div.classList.add('success');
                             }
                             
-                            // Human readable date converter from unix [timestamp]
-                            const match = log.match(/^\[(\d+)\] (.*)/);
+                            // Human readable date converter from unix [timestamp] formatted in Asia/Jakarta (WIB)
+                            const match = log.match(/^\[(\d+)\] (?:\[[^\]]+\] )?(.*)/);
                             if (match) {
                                 const timestamp = parseInt(match[1]) * 1000;
-                                const dateStr = new Date(timestamp).toLocaleTimeString();
-                                div.textContent = `[${dateStr}] ${match[2]}`;
+                                const dateStr = new Intl.DateTimeFormat('id-ID', {
+                                    timeZone: 'Asia/Jakarta',
+                                    year: 'numeric',
+                                    month: '2-digit',
+                                    day: '2-digit',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                    hour12: false
+                                }).format(new Date(timestamp));
+                                div.textContent = `[${dateStr} WIB] ${match[2]}`;
                             } else {
                                 div.textContent = log;
                             }
@@ -1695,6 +1865,252 @@
                         displayScanResults(prog.results, false);
                     }
                 });
+        }
+
+        // --- Web Guard & Whitelist Management ---
+        let currentDomainCursor = null;
+        let domainHistoryStack = [];
+        let hasMoreDomains = false;
+        let domainSearchQuery = '';
+        let searchDebounceTimer = null;
+
+        function loadWebGuardDomains(reset = false) {
+            if (reset) {
+                currentDomainCursor = null;
+                domainHistoryStack = [];
+            }
+
+            const searchParam = domainSearchQuery ? `&search=${encodeURIComponent(domainSearchQuery)}` : '';
+            const cursorParam = currentDomainCursor ? `&cursor=${encodeURIComponent(currentDomainCursor)}` : '';
+            const url = `/api/blacklist/domains/detailed?limit=25${searchParam}${cursorParam}`;
+
+            const tbody = document.getElementById('webguard-domains-tbody');
+            if (reset) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Memuat daftar domain terblokir...</td></tr>`;
+            }
+
+            authFetch(url)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('webguard-total-domains').textContent = data.total_count || 0;
+                    tbody.innerHTML = '';
+
+                    if (!data.items || data.items.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Tidak ada domain yang cocok.</td></tr>`;
+                        document.getElementById('webguard-page-info').textContent = `Menampilkan 0 dari ${data.total_count || 0} domain`;
+                        document.getElementById('webguard-first-btn').disabled = true;
+                        document.getElementById('webguard-next-btn').disabled = true;
+                        return;
+                    }
+
+                    data.items.forEach(item => {
+                        const tr = document.createElement('tr');
+
+                        const domainCell = document.createElement('td');
+                        domainCell.textContent = item.domain;
+                        domainCell.style.fontFamily = 'monospace';
+                        domainCell.style.fontWeight = '600';
+
+                        const categoryCell = document.createElement('td');
+                        const catBadge = document.createElement('span');
+                        catBadge.className = 'badge badge-info';
+                        catBadge.textContent = item.category;
+                        categoryCell.appendChild(catBadge);
+
+                        const sourceCell = document.createElement('td');
+                        const srcBadge = document.createElement('span');
+                        srcBadge.className = 'badge badge-medium';
+                        srcBadge.textContent = item.source;
+                        sourceCell.appendChild(srcBadge);
+
+                        const sevCell = document.createElement('td');
+                        const sevBadge = document.createElement('span');
+                        if (item.severity === 'Critical') {
+                            sevBadge.className = 'badge badge-critical';
+                        } else if (item.severity === 'High') {
+                            sevBadge.className = 'badge badge-high';
+                        } else {
+                            sevBadge.className = 'badge badge-info';
+                        }
+                        sevBadge.textContent = item.severity;
+                        sevCell.appendChild(sevBadge);
+
+                        const statusCell = document.createElement('td');
+                        const statusBadge = document.createElement('span');
+                        if (item.is_whitelisted) {
+                            statusBadge.className = 'badge badge-success';
+                            statusBadge.textContent = 'Diizinkan (Whitelist)';
+                        } else {
+                            statusBadge.className = 'badge badge-critical';
+                            statusBadge.textContent = 'Aktif Terblokir';
+                        }
+                        statusCell.appendChild(statusBadge);
+
+                        const actionCell = document.createElement('td');
+                        actionCell.className = 'actions-cell';
+                        if (item.is_whitelisted) {
+                            const unWlBtn = document.createElement('button');
+                            unWlBtn.className = 'btn btn-secondary';
+                            unWlBtn.style.padding = '0.25rem 0.6rem';
+                            unWlBtn.style.fontSize = '0.8rem';
+                            unWlBtn.textContent = 'Re-block';
+                            unWlBtn.onclick = () => removeWhitelistEntry(item.domain);
+                            actionCell.appendChild(unWlBtn);
+                        } else {
+                            const wlBtn = document.createElement('button');
+                            wlBtn.className = 'btn';
+                            wlBtn.style.padding = '0.25rem 0.6rem';
+                            wlBtn.style.fontSize = '0.8rem';
+                            wlBtn.textContent = '+ Whitelist (False Positive)';
+                            wlBtn.onclick = () => addToWhitelistDirect(item.domain);
+                            actionCell.appendChild(wlBtn);
+                        }
+
+                        tr.appendChild(domainCell);
+                        tr.appendChild(categoryCell);
+                        tr.appendChild(sourceCell);
+                        tr.appendChild(sevCell);
+                        tr.appendChild(statusCell);
+                        tr.appendChild(actionCell);
+                        tbody.appendChild(tr);
+                    });
+
+                    hasMoreDomains = data.has_more;
+                    nextDomainCursor = data.next_cursor;
+                    
+                    const shownCount = data.items.length;
+                    const cursorInfo = currentDomainCursor ? ` (setelah: ${currentDomainCursor})` : '';
+                    document.getElementById('webguard-page-info').textContent = `Menampilkan ${shownCount} domain dari total ${data.total_count}${cursorInfo}`;
+                    document.getElementById('webguard-first-btn').disabled = (domainHistoryStack.length === 0 && !currentDomainCursor);
+                    document.getElementById('webguard-next-btn').disabled = !data.has_more;
+                })
+                .catch(err => {
+                    console.error("Error loading webguard domains:", err);
+                    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--alert);">Gagal memuat domain terblokir.</td></tr>`;
+                });
+        }
+
+        function loadNextDomains() {
+            if (hasMoreDomains && nextDomainCursor) {
+                domainHistoryStack.push(currentDomainCursor);
+                currentDomainCursor = nextDomainCursor;
+                loadWebGuardDomains(false);
+            }
+        }
+
+        function debounceSearchDomains() {
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(() => {
+                domainSearchQuery = document.getElementById('domain-search-input').value.trim();
+                loadWebGuardDomains(true);
+            }, 300);
+        }
+
+        function resetDomainSearch() {
+            document.getElementById('domain-search-input').value = '';
+            domainSearchQuery = '';
+            loadWebGuardDomains(true);
+        }
+
+        function loadWhitelistData() {
+            authFetch('/api/whitelist')
+                .then(res => res.json())
+                .then(list => {
+                    document.getElementById('webguard-total-whitelist').textContent = list.length;
+                    const tbody = document.getElementById('whitelist-tbody');
+                    tbody.innerHTML = '';
+
+                    if (list.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">Belum ada item di whitelist.</td></tr>`;
+                        return;
+                    }
+
+                    list.forEach(item => {
+                        const tr = document.createElement('tr');
+
+                        const targetCell = document.createElement('td');
+                        targetCell.textContent = item;
+                        targetCell.style.fontFamily = 'monospace';
+                        targetCell.style.fontWeight = '600';
+
+                        const typeCell = document.createElement('td');
+                        const typeBadge = document.createElement('span');
+                        if (item.startsWith('/')) {
+                            typeBadge.className = 'badge badge-info';
+                            typeBadge.textContent = 'Berkas / File Path';
+                        } else if (/^\d+\.\d+\.\d+\.\d+$/.test(item)) {
+                            typeBadge.className = 'badge badge-medium';
+                            typeBadge.textContent = 'Alamat IP';
+                        } else {
+                            typeBadge.className = 'badge badge-success';
+                            typeBadge.textContent = 'Nama Domain / URL';
+                        }
+                        typeCell.appendChild(typeBadge);
+
+                        const actionCell = document.createElement('td');
+                        actionCell.className = 'actions-cell';
+                        const rmBtn = document.createElement('button');
+                        rmBtn.className = 'btn btn-danger';
+                        rmBtn.style.padding = '0.25rem 0.6rem';
+                        rmBtn.style.fontSize = '0.8rem';
+                        rmBtn.textContent = 'Hapus dari Whitelist';
+                        rmBtn.onclick = () => removeWhitelistEntry(item);
+                        actionCell.appendChild(rmBtn);
+
+                        tr.appendChild(targetCell);
+                        tr.appendChild(typeCell);
+                        tr.appendChild(actionCell);
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error("Error loading whitelist:", err));
+        }
+
+        function addToWhitelistDirect(target) {
+            if (confirm(`Apakah Anda yakin ingin memasukkan ${target} ke Whitelist?\nDomain/IP/File ini tidak akan diblokir lagi (penanganan False Positive).`)) {
+                authFetch(`/api/whitelist/add?target=${encodeURIComponent(target)}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert(`[+] ${target} berhasil ditambahkan ke Whitelist.`);
+                            loadWebGuardDomains(false);
+                            loadWhitelistData();
+                            fetchLogs();
+                        } else {
+                            alert(`[-] Gagal menambahkan ke whitelist: ${data.error || 'Terjadi kesalahan'}`);
+                        }
+                    })
+                    .catch(err => alert("Kesalahan koneksi: " + err.message));
+            }
+        }
+
+        function addCustomWhitelist() {
+            const input = document.getElementById('whitelist-input');
+            const target = input.value.trim();
+            if (!target) {
+                alert("Mohon masukkan nama domain, IP, atau file path.");
+                return;
+            }
+            addToWhitelistDirect(target);
+            input.value = '';
+        }
+
+        function removeWhitelistEntry(target) {
+            if (confirm(`Hapus ${target} dari Whitelist?\nItem ini akan kembali tunduk pada pemblokiran aturan keamanan FerroShield.`)) {
+                authFetch(`/api/whitelist/remove?target=${encodeURIComponent(target)}`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert(`[+] ${target} berhasil dihapus dari Whitelist.`);
+                            loadWebGuardDomains(false);
+                            loadWhitelistData();
+                            fetchLogs();
+                        } else {
+                            alert(`[-] Gagal menghapus dari whitelist: ${data.error || 'Terjadi kesalahan'}`);
+                        }
+                    })
+                    .catch(err => alert("Kesalahan koneksi: " + err.message));
+            }
         }
 
         // Polling background updates

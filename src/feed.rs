@@ -136,15 +136,18 @@ pub fn update_threat_feed() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Tidak ada threat feed baru yang berhasil diunduh.".into());
     }
 
-    // 3. Load existing rules.json
-    let rules_path = "rules.json";
-    let key_path = "rules.key";
+    // 3. Load existing rules.json (local or installed location)
+    let rules_path = crate::config::resolve_rules_path();
+    let key_path = rules_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("rules.key");
 
-    if !Path::new(rules_path).exists() {
+    if !rules_path.exists() {
         return Err("rules.json tidak ditemukan.".into());
     }
 
-    let data = fs::read_to_string(rules_path)?;
+    let data = fs::read_to_string(&rules_path)?;
     let mut config: crate::config::RulesConfig = serde_json::from_str(&data)?;
 
     // 4. Merge and deduplicate
@@ -164,12 +167,12 @@ pub fn update_threat_feed() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Write back rules.json (only after all entries passed validation above)
     let updated_data = serde_json::to_string_pretty(&config)?;
-    fs::write(rules_path, updated_data)?;
+    fs::write(&rules_path, updated_data)?;
     log_message("[+] Berkas rules.json berhasil diperbarui dengan feed terbaru.");
 
     // 6. Sign rules.json using rules.key if it exists
-    if Path::new(key_path).exists() {
-        match crate::config::sign_rules(rules_path, key_path) {
+    if key_path.exists() {
+        match crate::config::sign_rules(&rules_path, &key_path) {
             Ok(_) => {
                 log_message("[+] Berhasil menandatangani rules.json dengan rules.key.");
             }

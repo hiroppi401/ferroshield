@@ -319,6 +319,18 @@ pub fn update_rules_yar_sha256_in_rules<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Locates rules.json, preferring ./rules.json (current working directory) and
+/// falling back to the installed location /etc/ferroshield/rules.json. Mirrors
+/// the resolution used for config.json so subcommands work from any directory.
+pub fn resolve_rules_path() -> PathBuf {
+    let cwd = PathBuf::from("rules.json");
+    if cwd.exists() {
+        cwd
+    } else {
+        PathBuf::from("/etc/ferroshield/rules.json")
+    }
+}
+
 pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig, Box<dyn std::error::Error>> {
     let path_ref = path.as_ref();
     verify_rules_signature(path_ref)?;

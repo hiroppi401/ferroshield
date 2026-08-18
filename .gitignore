@@ -16,6 +16,8 @@ dashboard.token
 
 # Local data
 .quarantine/
+/feeds/*.txt
+/feeds/
 
 # Build artifacts
 /dist/

@@ -110,7 +110,7 @@ fn main() {
             return;
         }
         "block-hosts" => {
-            let rules_config = match load_rules("rules.json") {
+            let rules_config = match load_rules(config::resolve_rules_path()) {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     eprintln!("[-] Gagal memuat rules.json: {}", e);
@@ -212,8 +212,8 @@ fn main() {
         }
     };
 
-    let config_path = "rules.json";
-    let rules_config = match load_rules(config_path) {
+    let config_path = config::resolve_rules_path();
+    let rules_config = match load_rules(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("[-] Gagal memuat rules.json: {}", e);
@@ -794,7 +794,7 @@ fn main() {
             });
 
             // 5. Thread Rules Integrity Guard
-            let rules_file_path = config_path.to_string();
+            let rules_file_path = config_path.to_string_lossy().to_string();
             let mut last_modified = std::fs::metadata(&rules_file_path)
                 .and_then(|m| m.modified())
                 .unwrap_or_else(|_| std::time::SystemTime::now());
@@ -934,9 +934,12 @@ mod sudo {
 
 fn sign_rules_with_ebpf_hash() {
     println!("[*] Menandatangani rules.json memakai rules.key...");
-    let rules_path = "rules.json";
-    let key_path = "rules.key";
-    if !Path::new(key_path).exists() {
+    let rules_path = config::resolve_rules_path();
+    let key_path = rules_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("rules.key");
+    if !Path::new(&key_path).exists() {
         eprintln!("[-] Gagal: rules.key tidak ditemukan. Silakan buat keypair terlebih dahulu.");
         return;
     }
@@ -945,7 +948,7 @@ fn sign_rules_with_ebpf_hash() {
     // replaced undetected. Candidate paths are tried in order: installed location,
     // then in-tree / packaged object files.
     match config::update_ebpf_sha256_in_rules(
-        rules_path,
+        &rules_path,
         &[
             PathBuf::from("/usr/lib/ferroshield/ferroshield_ebpf.o"),
             PathBuf::from("src/ebpf/ferroshield_ebpf.o"),
@@ -956,7 +959,7 @@ fn sign_rules_with_ebpf_hash() {
         Err(e) => eprintln!("[-] Gagal mencatat hash eBPF: {}", e),
     }
     match config::update_rules_yar_sha256_in_rules(
-        rules_path,
+        &rules_path,
         &[
             PathBuf::from("/etc/ferroshield/rules.yar"),
             PathBuf::from("rules.yar"),
@@ -965,7 +968,7 @@ fn sign_rules_with_ebpf_hash() {
         Ok(_) => println!("[+] Hash rules.yar dicatat di rules.json (rules_yar_sha256)."),
         Err(e) => eprintln!("[-] Gagal mencatat hash rules.yar: {}", e),
     }
-    match config::sign_rules(rules_path, key_path) {
+    match config::sign_rules(&rules_path, &key_path) {
         Ok(_) => println!(
             "[+] rules.json berhasil ditandatangani! Berkas rules.json.sig telah diperbarui."
         ),

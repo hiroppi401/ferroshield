@@ -170,6 +170,13 @@ fn read_control(path: &Path) -> String {
 
 /// Spawns a detached CLI scan process (`ferroshield scan <target> --json [--delete] [--resume]`).
 /// The web server reads its JSON progress lines to drive the UI progress bar.
+///
+/// The scan is launched inside a transient systemd scope (`systemd-run --scope`)
+/// so it gets its own cgroup in `/system.slice/` instead of inheriting the
+/// daemon's cgroup, which the packaged service limits to `CPUQuota=30%`. Without
+/// this, an on-demand UI scan would be throttled to ~1/3 of a core while a plain
+/// CLI scan runs at full speed. On non-systemd systems (openrc, etc.) it falls
+/// back to spawning the binary directly, exactly as before.
 pub fn spawn_scan_process(
     target: &str,
     delete: bool,
@@ -178,23 +185,54 @@ pub fn spawn_scan_process(
 ) -> Result<Child, String> {
     let exe =
         std::env::current_exe().map_err(|e| format!("Gagal mendapatkan path binary: {}", e))?;
-    let mut cmd = Command::new(exe);
-    cmd.arg("scan").arg(target);
+
+    let mut args = vec!["scan".to_string(), target.to_string()];
     if delete {
-        cmd.arg("--delete");
+        args.push("--delete".to_string());
     }
-    cmd.arg("--json");
+    args.push("--json".to_string());
     if resume {
-        cmd.arg("--resume");
+        args.push("--resume".to_string());
     }
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
-    cmd.stdin(Stdio::null());
+
+    // Stop any stale transient scope from a previous session first, otherwise
+    // systemd-run fails because the fixed unit name is still active.
+    let _ = Command::new("systemctl")
+        .args(["stop", "ferroshield-scan"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let child = match Command::new("systemd-run")
+        .args([
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--unit=ferroshield-scan",
+            "--",
+        ])
+        .arg(&exe)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        // systemd-run unavailable (non-systemd init): spawn directly.
+        Err(_) => {
+            let mut cmd = Command::new(&exe);
+            cmd.args(&args);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::inherit());
+            cmd.stdin(Stdio::null());
+            cmd.spawn()
+                .map_err(|e| format!("Gagal memulai proses pemindaian CLI: {}", e))?
+        }
+    };
+
     // Clear any leftover stop/pause command from a previous session
     clear_control(&control_path(quarantine_dir));
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Gagal memulai proses pemindaian CLI: {}", e))?;
     let _ = fs::write(scan_pid_path(quarantine_dir), child.id().to_string());
     Ok(child)
 }

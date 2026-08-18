@@ -41,6 +41,15 @@ fn terminate_scan_child() {
         let _ = child.kill();
         let _ = child.wait();
     }
+    // The scan runs as a transient systemd scope (`systemd-run --scope`). Killing
+    // the `systemd-run` parent above does not kill the scope's own process, so
+    // also stop the unit to prevent a stuck scan from leaking or blocking the
+    // next scan (the fixed unit name would collide). Harmless if absent.
+    let _ = std::process::Command::new("systemctl")
+        .args(["stop", "ferroshield-scan"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Spawns the CLI scan process (`ferroshield scan <target> --json`) and follows its
@@ -131,6 +140,23 @@ struct UrlCheckResponse {
     category: Option<String>,
     matched: Option<String>,
     reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BlockedDomainDetail {
+    pub domain: String,
+    pub category: String,
+    pub source: String,
+    pub severity: String,
+    pub is_whitelisted: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaginatedDomainsResponse {
+    pub items: Vec<BlockedDomainDetail>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub total_count: usize,
 }
 
 const DASHBOARD_TOKEN_FILE: &str = "dashboard.token";
@@ -549,6 +575,13 @@ fn handle_request(
                 .with_status_code(StatusCode(200))
                 .with_header(json_header))
         }
+        (&Method::Get, "/api/whitelist") => {
+            let list = crate::utils::load_whitelist();
+            let body = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+            Ok(Response::from_string(body)
+                .with_status_code(StatusCode(200))
+                .with_header(json_header))
+        }
         (&Method::Post, "/api/scan") => {
             let mut content = String::new();
             request
@@ -916,7 +949,7 @@ fn handle_request(
 
             // Full domain blacklist snapshot for the extension's dynamic
             // declarativeNetRequest sync (network-level blocking of subresources).
-            if url.starts_with("/api/blacklist/domains") && method == &Method::Get {
+            if url.starts_with("/api/blacklist/domains") && !url.starts_with("/api/blacklist/domains/detailed") && method == &Method::Get {
                 let body = format!(
                     "{{\"domains\": {}}}",
                     serde_json::to_string(&ctx.rules_config.network_blacklist.domains)
@@ -925,6 +958,139 @@ fn handle_request(
                 return Ok(Response::from_string(body)
                     .with_status_code(StatusCode(200))
                     .with_header(json_header));
+            }
+
+            // Detailed & paginated blocked domains list with metadata & cursor-based pagination
+            if url.starts_with("/api/blacklist/domains/detailed") && method == &Method::Get {
+                let mut all_domains = ctx.rules_config.network_blacklist.domains.clone();
+                all_domains.sort_unstable();
+
+                let search_opt = get_query_param(url, "search").map(|s| s.to_lowercase());
+                let cursor_opt = get_query_param(url, "cursor");
+                let limit: usize = get_query_param(url, "limit")
+                    .and_then(|l| l.parse().ok())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+
+                let filtered_domains: Vec<String> = all_domains
+                    .into_iter()
+                    .filter(|d| {
+                        if let Some(ref q) = search_opt {
+                            if q.is_empty() {
+                                return true;
+                            }
+                            let (cat, src, sev) = classify_domain(d);
+                            d.to_lowercase().contains(q)
+                                || cat.to_lowercase().contains(q)
+                                || src.to_lowercase().contains(q)
+                                || sev.to_lowercase().contains(q)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                let total_count = filtered_domains.len();
+
+                let start_idx = if let Some(ref c) = cursor_opt {
+                    filtered_domains
+                        .iter()
+                        .position(|d| d > c)
+                        .unwrap_or(filtered_domains.len())
+                } else {
+                    0
+                };
+
+                let end_idx = (start_idx + limit).min(filtered_domains.len());
+                let page_slice = if start_idx < filtered_domains.len() {
+                    &filtered_domains[start_idx..end_idx]
+                } else {
+                    &[]
+                };
+
+                let has_more = end_idx < filtered_domains.len();
+                let next_cursor = if has_more && !page_slice.is_empty() {
+                    Some(page_slice.last().unwrap().clone())
+                } else {
+                    None
+                };
+
+                let items: Vec<BlockedDomainDetail> = page_slice
+                    .iter()
+                    .map(|d| {
+                        let (category, source, severity) = classify_domain(d);
+                        let is_whitelisted = crate::utils::is_whitelisted(d);
+                        BlockedDomainDetail {
+                            domain: d.clone(),
+                            category,
+                            source,
+                            severity,
+                            is_whitelisted,
+                        }
+                    })
+                    .collect();
+
+                let resp = PaginatedDomainsResponse {
+                    items,
+                    next_cursor,
+                    has_more,
+                    total_count,
+                };
+                let body = serde_json::to_string(&resp).map_err(|e| e.to_string())?;
+                return Ok(Response::from_string(body)
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header));
+            }
+
+            // Whitelist management endpoints (add / remove)
+            if url.starts_with("/api/whitelist/add") && method == &Method::Post {
+                let target = get_query_param(url, "target")
+                    .ok_or_else(|| "Missing target parameter".to_string())?;
+                let target = target.trim();
+                if target.is_empty() {
+                    return Ok(Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
+                        .with_status_code(StatusCode(400))
+                        .with_header(json_header));
+                }
+                if let Err(e) = crate::utils::add_to_whitelist(target) {
+                    return Ok(Response::from_string(format!("{{\"error\": \"{}\"}}", e))
+                        .with_status_code(StatusCode(500))
+                        .with_header(json_header));
+                }
+                let _ = crate::browser::unblock_domain_in_hosts(target);
+                log_message(&format!("[+] Web API: Menambahkan ke whitelist: {}", target));
+                return Ok(Response::from_string("{\"success\": true, \"message\": \"Item berhasil ditambahkan ke whitelist.\"}")
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header));
+            }
+
+            if url.starts_with("/api/whitelist/remove") && method == &Method::Post {
+                let target = get_query_param(url, "target")
+                    .ok_or_else(|| "Missing target parameter".to_string())?;
+                let target = target.trim();
+                if target.is_empty() {
+                    return Ok(Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
+                        .with_status_code(StatusCode(400))
+                        .with_header(json_header));
+                }
+                match crate::utils::remove_from_whitelist(target) {
+                    Ok(true) => {
+                        log_message(&format!("[+] Web API: Menghapus dari whitelist: {}", target));
+                        return Ok(Response::from_string("{\"success\": true, \"message\": \"Item dihapus dari whitelist.\"}")
+                            .with_status_code(StatusCode(200))
+                            .with_header(json_header));
+                    }
+                    Ok(false) => {
+                        return Ok(Response::from_string("{\"error\": \"Item tidak ditemukan di whitelist\"}")
+                            .with_status_code(StatusCode(404))
+                            .with_header(json_header));
+                    }
+                    Err(e) => {
+                        return Ok(Response::from_string(format!("{{\"error\": \"{}\"}}", e))
+                            .with_status_code(StatusCode(500))
+                            .with_header(json_header));
+                    }
+                }
             }
 
             // Check query params endpoints like /api/quarantine/restore?id=xxx
@@ -1021,6 +1187,28 @@ fn handle_request(
     }
 }
 
+/// Helper to decode percent-encoded URL query parameters (e.g. %20 -> ' ')
+fn url_decode(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 && let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&hex);
+            }
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Simple helper to parse a query param from url string (e.g. ?id=xyz)
 fn get_query_param(url: &str, param_name: &str) -> Option<String> {
     let parts: Vec<&str> = url.split('?').collect();
@@ -1031,10 +1219,26 @@ fn get_query_param(url: &str, param_name: &str) -> Option<String> {
     for pair in query_string.split('&') {
         let kv: Vec<&str> = pair.split('=').collect();
         if kv.len() == 2 && kv[0] == param_name {
-            return Some(kv[1].to_string());
+            return Some(url_decode(kv[1]));
         }
     }
     None
+}
+
+/// Classifies a domain into Threat Category, Information Source, and Severity
+pub fn classify_domain(domain: &str) -> (String, String, String) {
+    let d = domain.to_lowercase();
+    if d.contains("pool") || d.contains("stratum") || d.contains("xmr") || d.contains("mine") || d.contains("nano") || d.contains("hash") {
+        ("Cryptomining Pool".to_string(), "Threat Intel Feed".to_string(), "Critical".to_string())
+    } else if d.ends_with(".lol") || d.ends_with(".ru") || d.contains("bot") || d.contains("ssh.") || d.contains("microc2") {
+        ("C2 Command & Control / Botnet".to_string(), "Feodo & URLhaus Tracker".to_string(), "Critical".to_string())
+    } else if d.contains("amazom") || d.contains("login") || d.contains("secure") || d.contains("b2brouter") || d.contains("panel.") {
+        ("Phishing / Credential Harvesting".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
+    } else if d.contains("download") || d.contains("suxiazai") || d.contains("sysupdate") || d.contains("backup.") {
+        ("Malware Delivery / Dropper".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
+    } else {
+        ("Malicious Domain / Threat Host".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
+    }
 }
 
 /// Extracts the lowercase hostname from a URL string without pulling in the
@@ -1157,7 +1361,25 @@ fn check_url_against_blacklist(url: &str, rules: &RulesConfig) -> UrlCheckRespon
         };
     };
 
+    // 0. Check Whitelist first (False Positive override)
+    if crate::utils::is_whitelisted(&host) {
+        return UrlCheckResponse {
+            blocked: false,
+            category: Some("whitelist".to_string()),
+            matched: Some(host),
+            reason: Some("Domain diizinkan dalam daftar Whitelist (False Positive).".to_string()),
+        };
+    }
+
     if let Some(matched) = domain_matches_blacklist(&host, &rules.network_blacklist.domains) {
+        if crate::utils::is_whitelisted(&matched) {
+            return UrlCheckResponse {
+                blocked: false,
+                category: Some("whitelist".to_string()),
+                matched: Some(matched),
+                reason: Some("Domain diizinkan dalam daftar Whitelist (False Positive).".to_string()),
+            };
+        }
         return UrlCheckResponse {
             blocked: true,
             category: Some("domain".to_string()),
@@ -1174,6 +1396,9 @@ fn check_url_against_blacklist(url: &str, rules: &RulesConfig) -> UrlCheckRespon
     // that resolve to such IPs.
     for ip in resolve_ips(&host) {
         if rules.network_blacklist.ips.contains(&ip) {
+            if crate::utils::is_whitelisted(&ip) {
+                continue;
+            }
             return UrlCheckResponse {
                 blocked: true,
                 category: Some("ip".to_string()),
@@ -1506,5 +1731,23 @@ mod tests {
             Some("zz")
         );
         assert_eq!(get_query_param("/api/x?id=abc&a=1", "nope"), None);
+        assert_eq!(
+            get_query_param("/api/x?target=https%3A%2F%2Fexample.com", "target").as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn test_classify_domain() {
+        let (cat1, src1, sev1) = classify_domain("xmr-asia1.nanopool.org");
+        assert_eq!(cat1, "Cryptomining Pool");
+        assert!(src1.contains("Threat Intel"));
+        assert_eq!(sev1, "Critical");
+
+        let (cat2, _, _) = classify_domain("ssh.microc2.lol");
+        assert!(cat2.contains("C2"));
+
+        let (cat3, _, _) = classify_domain("panel.b2brouter-secure.com");
+        assert!(cat3.contains("Phishing"));
     }
 }
