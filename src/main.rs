@@ -425,7 +425,7 @@ fn main() {
                 ) {
                     Ok(mut ebpf_monitor) => {
                         log_message("[+] Monitor Jaringan: eBPF aktif secara real-time!");
-                        if let Err(e) = ebpf_monitor.run() {
+                        if let Err(e) = ebpf_monitor.run(net_config.clone()) {
                             log_message(&format!(
                                 "[-] Gagal menjalankan eBPF: {}. Menggunakan fallback polling procfs.",
                                 e

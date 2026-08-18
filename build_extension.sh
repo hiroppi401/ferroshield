@@ -22,7 +22,7 @@ err()  { printf '\033[1;31m[-]\033[0m %s\n' "$*"; exit 1; }
 command -v zip >/dev/null 2>&1 || err "Perintah 'zip' diperlukan untuk memaketkan ekstensi."
 
 VERSION=$(sed -n 's/.*"version": *"\{0,1\}\([^",]*\)"\{0,1\}.*/\1/p' "$EXT_DIR/manifest.json" | head -n1)
-[ -n "$VERSION" ] || VERSION="0.1.0"
+[ -n "$VERSION" ] || VERSION="1.0.1"
 
 TARGET="all"
 if [ "$1" = "--firefox" ]; then

@@ -492,6 +492,7 @@ pub fn verify_file_sha256(path: &Path, expected_sha256: &str) -> Result<(), Stri
     Ok(())
 }
 
+use crate::config::RulesConfig;
 use crate::contain::{self, ContainStrategy};
 use crate::quarantine::QuarantineManager;
 use crate::scanner::Scanner;
@@ -501,6 +502,7 @@ use aya::maps::perf::PerfEventArray;
 use aya::programs::TracePoint;
 use aya::util::online_cpus;
 use bytes::BytesMut;
+use std::sync::{Arc, RwLock};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -515,6 +517,7 @@ pub struct ConnectEvent {
 pub struct EbpfMonitor {
     bpf: Bpf,
     _blacklist_ips: Vec<String>,
+    _blacklist_domains: Vec<String>,
     scanner: Scanner,
     quarantine: QuarantineManager,
     action: String,
@@ -538,10 +541,13 @@ impl EbpfMonitor {
         expected_sha256: Option<&str>,
         contain_strategy: ContainStrategy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let bpf_path = "/usr/lib/ferroshield/ferroshield_ebpf.o";
-        if !Path::new(bpf_path).exists() {
+        let bpf_path = if Path::new("/usr/lib/ferroshield/ferroshield_ebpf.o").exists() {
+            "/usr/lib/ferroshield/ferroshield_ebpf.o"
+        } else if Path::new("src/ebpf/ferroshield_ebpf.o").exists() {
+            "src/ebpf/ferroshield_ebpf.o"
+        } else {
             return Err("eBPF object file not found at /usr/lib/ferroshield/ferroshield_ebpf.o. Silakan pasang modul kernel FerroShield.".into());
-        }
+        };
         if let Some(expected) = expected_sha256 {
             verify_file_sha256(Path::new(bpf_path), expected)?;
             log_message(&format!(
@@ -555,45 +561,122 @@ impl EbpfMonitor {
             ));
         }
         let data = std::fs::read(bpf_path)?;
-        let mut bpf = Bpf::load(&data)?;
+        let bpf = Bpf::load(&data)?;
 
-        // Populate BLACKLIST_IPS map
-        if let Some(m) = bpf.map_mut("BLACKLIST_IPS") {
-            let mut hash_map = aya::maps::HashMap::try_from(m)?;
+        let mut monitor = Self {
+            bpf,
+            _blacklist_ips: Vec::new(),
+            _blacklist_domains: Vec::new(),
+            scanner,
+            quarantine,
+            action: action.to_string(),
+            contain_strategy,
+        };
+
+        monitor.refresh_blacklists(ips, domains)?;
+        Ok(monitor)
+    }
+
+    /// Refresh BLACKLIST_IPS and BLACKLIST_DOMAINS kernel maps with new data.
+    /// New entries are inserted first to prevent protection gaps, then old
+    /// stale entries are removed.
+    pub fn refresh_blacklists(
+        &mut self,
+        ips: &[String],
+        domains: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Populate and synchronize BLACKLIST_IPS map
+        if let Some(m) = self.bpf.map_mut("BLACKLIST_IPS") {
+            let mut hash_map: aya::maps::HashMap<_, u32, u8> = aya::maps::HashMap::try_from(m)?;
+            let mut new_ips = std::collections::HashSet::new();
             for ip in ips {
                 if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
-                    let val: u8 = 1;
                     let ip_u32 = u32::from_ne_bytes(addr.octets());
-                    hash_map.insert(ip_u32, val, 0)?;
+                    hash_map.insert(ip_u32, 1u8, 0)?;
+                    new_ips.insert(ip_u32);
+                }
+            }
+
+            let old_keys: Vec<u32> = hash_map.keys().filter_map(Result::ok).collect();
+            for key in old_keys {
+                if !new_ips.contains(&key) {
+                    let _ = hash_map.remove(&key);
                 }
             }
         }
 
-        // Populate BLACKLIST_DOMAINS map
-        if let Some(m) = bpf.map_mut("BLACKLIST_DOMAINS") {
+        // Populate and synchronize BLACKLIST_DOMAINS map
+        if let Some(m) = self.bpf.map_mut("BLACKLIST_DOMAINS") {
             let mut hash_map: aya::maps::HashMap<_, [u8; 64], u8> =
                 aya::maps::HashMap::try_from(m)?;
+            let mut new_domains = std::collections::HashSet::new();
             for domain in domains {
                 let mut domain_bytes = [0u8; 64];
                 let bytes = domain.as_bytes();
                 let len = bytes.len().min(63);
                 domain_bytes[..len].copy_from_slice(&bytes[..len]);
-                let val: u8 = 1;
-                hash_map.insert(domain_bytes, val, 0)?;
+                hash_map.insert(domain_bytes, 1u8, 0)?;
+                new_domains.insert(domain_bytes);
+            }
+
+            let old_keys: Vec<[u8; 64]> = hash_map.keys().filter_map(Result::ok).collect();
+            for key in old_keys {
+                if !new_domains.contains(&key) {
+                    let _ = hash_map.remove(&key);
+                }
             }
         }
 
-        Ok(Self {
-            bpf,
-            _blacklist_ips: ips.to_vec(),
-            scanner,
-            quarantine,
-            action: action.to_string(),
-            contain_strategy,
-        })
+        self._blacklist_ips = ips.to_vec();
+        self._blacklist_domains = domains.to_vec();
+        Ok(())
     }
 
-    pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Read currently configured blacklist IPs directly from the eBPF kernel map.
+    #[allow(dead_code)]
+    pub fn get_blacklist_ips_from_map(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let m = self
+            .bpf
+            .map("BLACKLIST_IPS")
+            .ok_or("BLACKLIST_IPS map not found")?;
+        let hash_map: aya::maps::HashMap<_, u32, u8> = aya::maps::HashMap::try_from(m)?;
+        let mut ips = Vec::new();
+        for key_res in hash_map.keys() {
+            let key = key_res?;
+            let octets = key.to_ne_bytes();
+            ips.push(format!(
+                "{}.{}.{}.{}",
+                octets[0], octets[1], octets[2], octets[3]
+            ));
+        }
+        Ok(ips)
+    }
+
+    /// Read currently configured blacklist domains directly from the eBPF kernel map.
+    #[allow(dead_code)]
+    pub fn get_blacklist_domains_from_map(
+        &self,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let m = self
+            .bpf
+            .map("BLACKLIST_DOMAINS")
+            .ok_or("BLACKLIST_DOMAINS map not found")?;
+        let hash_map: aya::maps::HashMap<_, [u8; 64], u8> = aya::maps::HashMap::try_from(m)?;
+        let mut domains = Vec::new();
+        for key_res in hash_map.keys() {
+            let key = key_res?;
+            let len = key.iter().position(|&b| b == 0).unwrap_or(key.len());
+            if let Ok(s) = std::str::from_utf8(&key[..len]) {
+                domains.push(s.to_string());
+            }
+        }
+        Ok(domains)
+    }
+
+    pub fn run(
+        &mut self,
+        rules_config: Arc<RwLock<RulesConfig>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let program: &mut TracePoint = self
             .bpf
             .program_mut("sys_enter_connect")
@@ -635,7 +718,7 @@ impl EbpfMonitor {
         }
 
         let mut perf_array =
-            PerfEventArray::try_from(self.bpf.map_mut("EVENTS").ok_or("EVENTS map not found")?)?;
+            PerfEventArray::try_from(self.bpf.take_map("EVENTS").ok_or("EVENTS map not found")?)?;
         let online_cpus = online_cpus()?;
 
         let mut buffers = Vec::new();
@@ -717,6 +800,35 @@ impl EbpfMonitor {
                         }
                     }
                 });
+            }
+
+            // Periodic refresh loop for kernel eBPF blacklist maps
+            let mut last_ips = self._blacklist_ips.clone();
+            let mut last_domains = self._blacklist_domains.clone();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let (curr_ips, curr_domains) = match rules_config.read() {
+                    Ok(cfg) => (
+                        cfg.network_blacklist.ips.clone(),
+                        cfg.network_blacklist.domains.clone(),
+                    ),
+                    Err(_) => continue,
+                };
+
+                if curr_ips != last_ips || curr_domains != last_domains {
+                    log_message(
+                        "[*] eBPF: Mendeteksi perubahan blacklist jaringan, memperbarui peta kernel...",
+                    );
+                    if let Err(e) = self.refresh_blacklists(&curr_ips, &curr_domains) {
+                        log_message(&format!("[-] eBPF: Gagal memperbarui peta kernel: {}", e));
+                    } else {
+                        last_ips = curr_ips;
+                        last_domains = curr_domains;
+                        log_message(
+                            "[+] eBPF: Peta kernel BLACKLIST_IPS dan BLACKLIST_DOMAINS berhasil diperbarui.",
+                        );
+                    }
+                }
             }
         });
 
@@ -822,5 +934,126 @@ mod tests {
         let first = detect_firewall_backend();
         let second = detect_firewall_backend();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_ebpf_monitor_refresh_blacklists() {
+        let initial_ips = vec!["1.2.3.4".to_string(), "10.0.0.1".to_string()];
+        let initial_domains = vec!["malware.com".to_string(), "c2.example".to_string()];
+        let scanner = Scanner::new(vec![], 0, None);
+        let quarantine = QuarantineManager::new("/tmp/test_quarantine_ebpf").unwrap();
+
+        let monitor_res = EbpfMonitor::new(
+            &initial_ips,
+            &initial_domains,
+            scanner,
+            quarantine,
+            "quarantine",
+            None,
+            ContainStrategy::Auto,
+        );
+
+        if let Ok(mut monitor) = monitor_res {
+            let ips = monitor.get_blacklist_ips_from_map().unwrap();
+            assert!(ips.contains(&"1.2.3.4".to_string()));
+            assert!(ips.contains(&"10.0.0.1".to_string()));
+
+            let domains = monitor.get_blacklist_domains_from_map().unwrap();
+            assert!(domains.contains(&"malware.com".to_string()));
+            assert!(domains.contains(&"c2.example".to_string()));
+
+            // Refresh with new IPs and domains (IP 1.2.3.4 removed, 192.168.1.100 added)
+            let new_ips = vec!["10.0.0.1".to_string(), "192.168.1.100".to_string()];
+            let new_domains = vec!["c2.example".to_string(), "newthreat.org".to_string()];
+
+            monitor.refresh_blacklists(&new_ips, &new_domains).unwrap();
+
+            let updated_ips = monitor.get_blacklist_ips_from_map().unwrap();
+            assert!(
+                !updated_ips.contains(&"1.2.3.4".to_string()),
+                "Old IP 1.2.3.4 must be removed"
+            );
+            assert!(
+                updated_ips.contains(&"10.0.0.1".to_string()),
+                "Retained IP 10.0.0.1 must be present"
+            );
+            assert!(
+                updated_ips.contains(&"192.168.1.100".to_string()),
+                "New IP 192.168.1.100 must be present"
+            );
+
+            let updated_domains = monitor.get_blacklist_domains_from_map().unwrap();
+            assert!(
+                !updated_domains.contains(&"malware.com".to_string()),
+                "Old domain malware.com must be removed"
+            );
+            assert!(
+                updated_domains.contains(&"c2.example".to_string()),
+                "Retained domain c2.example must be present"
+            );
+            assert!(
+                updated_domains.contains(&"newthreat.org".to_string()),
+                "New domain newthreat.org must be present"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ebpf_monitor_refresh_to_empty() {
+        let initial_ips = vec!["1.1.1.1".to_string(), "2.2.2.2".to_string()];
+        let initial_domains = vec!["bad.com".to_string()];
+        let scanner = Scanner::new(vec![], 0, None);
+        let quarantine = QuarantineManager::new("/tmp/test_quarantine_ebpf2").unwrap();
+
+        let monitor_res = EbpfMonitor::new(
+            &initial_ips,
+            &initial_domains,
+            scanner,
+            quarantine,
+            "quarantine",
+            None,
+            ContainStrategy::Auto,
+        );
+
+        if let Ok(mut monitor) = monitor_res {
+            let empty_ips: Vec<String> = Vec::new();
+            let empty_domains: Vec<String> = Vec::new();
+
+            monitor
+                .refresh_blacklists(&empty_ips, &empty_domains)
+                .unwrap();
+
+            let updated_ips = monitor.get_blacklist_ips_from_map().unwrap();
+            assert!(updated_ips.is_empty(), "All IPs must be removed");
+
+            let updated_domains = monitor.get_blacklist_domains_from_map().unwrap();
+            assert!(updated_domains.is_empty(), "All domains must be removed");
+        }
+    }
+
+    #[test]
+    fn test_ebpf_monitor_refresh_handles_invalid_entries() {
+        let initial_ips = vec!["not-an-ip".to_string(), "999.999.999.999".to_string()];
+        let initial_domains = vec!["valid.com".to_string()];
+        let scanner = Scanner::new(vec![], 0, None);
+        let quarantine = QuarantineManager::new("/tmp/test_quarantine_ebpf3").unwrap();
+
+        let monitor_res = EbpfMonitor::new(
+            &initial_ips,
+            &initial_domains,
+            scanner,
+            quarantine,
+            "quarantine",
+            None,
+            ContainStrategy::Auto,
+        );
+
+        if let Ok(monitor) = monitor_res {
+            let ips = monitor.get_blacklist_ips_from_map().unwrap();
+            assert!(ips.is_empty(), "Malformed IPs should not be inserted");
+
+            let domains = monitor.get_blacklist_domains_from_map().unwrap();
+            assert_eq!(domains, vec!["valid.com".to_string()]);
+        }
     }
 }
