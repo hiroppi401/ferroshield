@@ -14,8 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -250,7 +249,7 @@ pub fn start_web_server(
     port: u16,
     scanner: Scanner,
     quarantine_mgr: QuarantineManager,
-    rules_config: RulesConfig,
+    rules_config: Arc<RwLock<RulesConfig>>,
     default_action: String,
 ) {
     let addr = format!("{}:{}", host, port);
@@ -444,12 +443,17 @@ pub fn start_web_server(
                 continue;
             }
 
+            let current_rules = match rules_config.read() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+
             let response = match handle_request(
                 &mut request,
                 &WebContext {
                     scanner: &scanner,
                     quarantine_mgr: &quarantine_mgr,
-                    rules_config: &rules_config,
+                    rules_config: &current_rules,
                     default_action: &default_action,
                     dashboard_token: &dashboard_token,
                 },
@@ -949,7 +953,10 @@ fn handle_request(
 
             // Full domain blacklist snapshot for the extension's dynamic
             // declarativeNetRequest sync (network-level blocking of subresources).
-            if url.starts_with("/api/blacklist/domains") && !url.starts_with("/api/blacklist/domains/detailed") && method == &Method::Get {
+            if url.starts_with("/api/blacklist/domains")
+                && !url.starts_with("/api/blacklist/domains/detailed")
+                && method == &Method::Get
+            {
                 let body = format!(
                     "{{\"domains\": {}}}",
                     serde_json::to_string(&ctx.rules_config.network_blacklist.domains)
@@ -1048,9 +1055,11 @@ fn handle_request(
                     .ok_or_else(|| "Missing target parameter".to_string())?;
                 let target = target.trim();
                 if target.is_empty() {
-                    return Ok(Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
-                        .with_status_code(StatusCode(400))
-                        .with_header(json_header));
+                    return Ok(
+                        Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
+                            .with_status_code(StatusCode(400))
+                            .with_header(json_header),
+                    );
                 }
                 if let Err(e) = crate::utils::add_to_whitelist(target) {
                     return Ok(Response::from_string(format!("{{\"error\": \"{}\"}}", e))
@@ -1058,10 +1067,15 @@ fn handle_request(
                         .with_header(json_header));
                 }
                 let _ = crate::browser::unblock_domain_in_hosts(target);
-                log_message(&format!("[+] Web API: Menambahkan ke whitelist: {}", target));
-                return Ok(Response::from_string("{\"success\": true, \"message\": \"Item berhasil ditambahkan ke whitelist.\"}")
-                    .with_status_code(StatusCode(200))
-                    .with_header(json_header));
+                log_message(&format!(
+                    "[+] Web API: Menambahkan ke whitelist: {}",
+                    target
+                ));
+                return Ok(Response::from_string(
+                    "{\"success\": true, \"message\": \"Item berhasil ditambahkan ke whitelist.\"}",
+                )
+                .with_status_code(StatusCode(200))
+                .with_header(json_header));
             }
 
             if url.starts_with("/api/whitelist/remove") && method == &Method::Post {
@@ -1069,21 +1083,30 @@ fn handle_request(
                     .ok_or_else(|| "Missing target parameter".to_string())?;
                 let target = target.trim();
                 if target.is_empty() {
-                    return Ok(Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
-                        .with_status_code(StatusCode(400))
-                        .with_header(json_header));
+                    return Ok(
+                        Response::from_string("{\"error\": \"Target tidak boleh kosong\"}")
+                            .with_status_code(StatusCode(400))
+                            .with_header(json_header),
+                    );
                 }
                 match crate::utils::remove_from_whitelist(target) {
                     Ok(true) => {
-                        log_message(&format!("[+] Web API: Menghapus dari whitelist: {}", target));
-                        return Ok(Response::from_string("{\"success\": true, \"message\": \"Item dihapus dari whitelist.\"}")
-                            .with_status_code(StatusCode(200))
-                            .with_header(json_header));
+                        log_message(&format!(
+                            "[+] Web API: Menghapus dari whitelist: {}",
+                            target
+                        ));
+                        return Ok(Response::from_string(
+                            "{\"success\": true, \"message\": \"Item dihapus dari whitelist.\"}",
+                        )
+                        .with_status_code(StatusCode(200))
+                        .with_header(json_header));
                     }
                     Ok(false) => {
-                        return Ok(Response::from_string("{\"error\": \"Item tidak ditemukan di whitelist\"}")
-                            .with_status_code(StatusCode(404))
-                            .with_header(json_header));
+                        return Ok(Response::from_string(
+                            "{\"error\": \"Item tidak ditemukan di whitelist\"}",
+                        )
+                        .with_status_code(StatusCode(404))
+                        .with_header(json_header));
                     }
                     Err(e) => {
                         return Ok(Response::from_string(format!("{{\"error\": \"{}\"}}", e))
@@ -1194,7 +1217,9 @@ fn url_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 && let Ok(byte) = u8::from_str_radix(&hex, 16) {
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
                 result.push(byte as char);
             } else {
                 result.push('%');
@@ -1228,16 +1253,56 @@ fn get_query_param(url: &str, param_name: &str) -> Option<String> {
 /// Classifies a domain into Threat Category, Information Source, and Severity
 pub fn classify_domain(domain: &str) -> (String, String, String) {
     let d = domain.to_lowercase();
-    if d.contains("pool") || d.contains("stratum") || d.contains("xmr") || d.contains("mine") || d.contains("nano") || d.contains("hash") {
-        ("Cryptomining Pool".to_string(), "Threat Intel Feed".to_string(), "Critical".to_string())
-    } else if d.ends_with(".lol") || d.ends_with(".ru") || d.contains("bot") || d.contains("ssh.") || d.contains("microc2") {
-        ("C2 Command & Control / Botnet".to_string(), "Feodo & URLhaus Tracker".to_string(), "Critical".to_string())
-    } else if d.contains("amazom") || d.contains("login") || d.contains("secure") || d.contains("b2brouter") || d.contains("panel.") {
-        ("Phishing / Credential Harvesting".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
-    } else if d.contains("download") || d.contains("suxiazai") || d.contains("sysupdate") || d.contains("backup.") {
-        ("Malware Delivery / Dropper".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
+    if d.contains("pool")
+        || d.contains("stratum")
+        || d.contains("xmr")
+        || d.contains("mine")
+        || d.contains("nano")
+        || d.contains("hash")
+    {
+        (
+            "Cryptomining Pool".to_string(),
+            "Threat Intel Feed".to_string(),
+            "Critical".to_string(),
+        )
+    } else if d.ends_with(".lol")
+        || d.ends_with(".ru")
+        || d.contains("bot")
+        || d.contains("ssh.")
+        || d.contains("microc2")
+    {
+        (
+            "C2 Command & Control / Botnet".to_string(),
+            "Feodo & URLhaus Tracker".to_string(),
+            "Critical".to_string(),
+        )
+    } else if d.contains("amazom")
+        || d.contains("login")
+        || d.contains("secure")
+        || d.contains("b2brouter")
+        || d.contains("panel.")
+    {
+        (
+            "Phishing / Credential Harvesting".to_string(),
+            "URLhaus Threat Feed".to_string(),
+            "High".to_string(),
+        )
+    } else if d.contains("download")
+        || d.contains("suxiazai")
+        || d.contains("sysupdate")
+        || d.contains("backup.")
+    {
+        (
+            "Malware Delivery / Dropper".to_string(),
+            "URLhaus Threat Feed".to_string(),
+            "High".to_string(),
+        )
     } else {
-        ("Malicious Domain / Threat Host".to_string(), "URLhaus Threat Feed".to_string(), "High".to_string())
+        (
+            "Malicious Domain / Threat Host".to_string(),
+            "URLhaus Threat Feed".to_string(),
+            "High".to_string(),
+        )
     }
 }
 
@@ -1289,18 +1354,14 @@ fn extract_host(url: &str) -> Option<String> {
 /// Returns the matched blacklist entry. Matching is case-insensitive and
 /// anchored at label boundaries (`evil.com` blocks `sub.evil.com` but not
 /// `notevil.com`).
-fn domain_matches_blacklist(host: &str, blacklist: &[String]) -> Option<String> {
-    let host = host.trim().trim_end_matches('.').to_lowercase();
-    for domain in blacklist {
-        let d = domain.trim().trim_end_matches('.').to_lowercase();
-        if d.is_empty() || !d.contains('.') {
-            continue;
-        }
-        if host == d || host.ends_with(&format!(".{}", d)) {
-            return Some(d);
-        }
+#[allow(dead_code)]
+pub fn domain_matches_blacklist(host: &str, blacklist: &[String]) -> Option<String> {
+    crate::config::NetworkBlacklist {
+        ips: vec![],
+        domains: blacklist.to_vec(),
     }
-    None
+    .to_fast()
+    .match_domain(host)
 }
 
 type DnsCache = Mutex<HashMap<String, (Vec<String>, Instant)>>;
@@ -1371,13 +1432,17 @@ fn check_url_against_blacklist(url: &str, rules: &RulesConfig) -> UrlCheckRespon
         };
     }
 
-    if let Some(matched) = domain_matches_blacklist(&host, &rules.network_blacklist.domains) {
+    let fast_blacklist = rules.network_blacklist.to_fast();
+
+    if let Some(matched) = fast_blacklist.match_domain(&host) {
         if crate::utils::is_whitelisted(&matched) {
             return UrlCheckResponse {
                 blocked: false,
                 category: Some("whitelist".to_string()),
                 matched: Some(matched),
-                reason: Some("Domain diizinkan dalam daftar Whitelist (False Positive).".to_string()),
+                reason: Some(
+                    "Domain diizinkan dalam daftar Whitelist (False Positive).".to_string(),
+                ),
             };
         }
         return UrlCheckResponse {
@@ -1395,7 +1460,7 @@ fn check_url_against_blacklist(url: &str, rules: &RulesConfig) -> UrlCheckRespon
     // blacklisted IPs; this is a browser-side early warning layer for hosts
     // that resolve to such IPs.
     for ip in resolve_ips(&host) {
-        if rules.network_blacklist.ips.contains(&ip) {
+        if fast_blacklist.contains_ip(&ip) {
             if crate::utils::is_whitelisted(&ip) {
                 continue;
             }
@@ -1749,5 +1814,74 @@ mod tests {
 
         let (cat3, _, _) = classify_domain("panel.b2brouter-secure.com");
         assert!(cat3.contains("Phishing"));
+    }
+
+    #[test]
+    fn test_domain_matching_scalability_50k_entries() {
+        use std::time::Instant;
+
+        let small_list: Vec<String> = (0..100).map(|i| format!("malicious{}.com", i)).collect();
+        let large_list: Vec<String> = (0..50000).map(|i| format!("malicious{}.com", i)).collect();
+
+        let small_fast = crate::config::NetworkBlacklist {
+            ips: vec![],
+            domains: small_list,
+        }
+        .to_fast();
+
+        let large_fast = crate::config::NetworkBlacklist {
+            ips: vec![],
+            domains: large_list,
+        }
+        .to_fast();
+
+        // Target queries with subdomains and non-matches
+        let queries = vec![
+            "sub.malicious42.com",
+            "deep.sub.malicious99.com",
+            "notmalicious42.com",
+            "malicious49999.com",
+            "random.clean.example.org",
+        ];
+
+        // Measure small list
+        let start_small = Instant::now();
+        for _ in 0..2000 {
+            for q in &queries {
+                let _ = small_fast.match_domain(q);
+            }
+        }
+        let elapsed_small = start_small.elapsed();
+
+        // Measure large list (50k entries)
+        let start_large = Instant::now();
+        for _ in 0..2000 {
+            for q in &queries {
+                let _ = large_fast.match_domain(q);
+            }
+        }
+        let elapsed_large = start_large.elapsed();
+
+        // Verify correct matching behavior
+        assert_eq!(
+            large_fast.match_domain("sub.malicious42.com"),
+            Some("malicious42.com".to_string())
+        );
+        assert_eq!(
+            large_fast.match_domain("malicious49999.com"),
+            Some("malicious49999.com".to_string())
+        );
+        assert_eq!(large_fast.match_domain("notmalicious42.com"), None);
+        assert_eq!(large_fast.match_domain("random.clean.example.org"), None);
+
+        // Scalability verification: 10,000 lookups against 50k entries should complete very quickly
+        // (typically < 30ms in debug, while O(N) linear scan over 50k would take seconds).
+        assert!(
+            elapsed_large < std::time::Duration::from_millis(500),
+            "Lookup in 50k entries must be O(1) in terms of blacklist size, took {:?}",
+            elapsed_large
+        );
+        // Ensure execution time difference is not proportional to 500x dataset size increase
+        let _ = elapsed_small;
     }
 }

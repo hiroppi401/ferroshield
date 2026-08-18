@@ -2,7 +2,7 @@ use crate::config::Rule;
 use md5::Context as Md5Context;
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -27,10 +27,60 @@ pub struct ScanResult {
     pub triggered_rules: Vec<Rule>,
 }
 
+type RuleIndexes = (
+    Vec<(String, Regex)>,
+    HashMap<String, Rule>,
+    HashMap<String, Rule>,
+    Vec<(tlsh_fixed::Tlsh, Rule)>,
+);
+
+fn build_rule_indexes(rules: &[Rule]) -> RuleIndexes {
+    use std::str::FromStr;
+
+    let mut compiled_regexes = Vec::new();
+    let mut sha256_index = HashMap::new();
+    let mut md5_index = HashMap::new();
+    let mut tlsh_rules = Vec::new();
+
+    for rule in rules {
+        if let Some(ref patterns) = rule.signatures.patterns {
+            for pattern in patterns {
+                if let Ok(re) = Regex::new(pattern) {
+                    compiled_regexes.push((rule.id.clone(), re));
+                }
+            }
+        }
+        if let Some(ref hashes) = rule.signatures.hashes {
+            if let Some(ref sha) = hashes.sha256 {
+                let s = sha.trim().to_lowercase();
+                if !s.is_empty() {
+                    sha256_index.insert(s, rule.clone());
+                }
+            }
+            if let Some(ref md5_hash) = hashes.md5 {
+                let m = md5_hash.trim().to_lowercase();
+                if !m.is_empty() {
+                    md5_index.insert(m, rule.clone());
+                }
+            }
+            if let Some(ref tlsh_str) = hashes.tlsh
+                && let Ok(tlsh) = tlsh_fixed::Tlsh::from_str(tlsh_str.trim())
+            {
+                tlsh_rules.push((tlsh, rule.clone()));
+            }
+        }
+    }
+
+    (compiled_regexes, sha256_index, md5_index, tlsh_rules)
+}
+
 #[derive(Clone)]
 pub struct Scanner {
     rules: Vec<Rule>,
     compiled_regexes: Vec<(String, Regex)>, // (rule_id, compiled_regex)
+    sha256_index: HashMap<String, Rule>,
+    md5_index: HashMap<String, Rule>,
+    tlsh_rules: Vec<(tlsh_fixed::Tlsh, Rule)>,
     yara_rules: Option<Arc<YaraRules>>,
     throttle_ms: u64,
 }
@@ -41,16 +91,7 @@ impl Scanner {
         throttle_ms: u64,
         expected_rules_yar_sha256: Option<&str>,
     ) -> Self {
-        let mut compiled_regexes = Vec::new();
-        for rule in &rules {
-            if let Some(ref patterns) = rule.signatures.patterns {
-                for pattern in patterns {
-                    if let Ok(re) = Regex::new(pattern) {
-                        compiled_regexes.push((rule.id.clone(), re));
-                    }
-                }
-            }
-        }
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
 
         // Attempt to load and compile rules.yar if it exists
         let yara_rules = if Path::new("rules.yar").exists() {
@@ -79,29 +120,52 @@ impl Scanner {
         Self {
             rules,
             compiled_regexes,
+            sha256_index,
+            md5_index,
+            tlsh_rules,
             yara_rules,
             throttle_ms,
         }
     }
 
+    /// Rebuilds all derived hash, TLSH, and regex indexes when rules are reloaded.
+    #[allow(dead_code)]
+    pub fn update_rules(&mut self, rules: Vec<Rule>) {
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
+        self.rules = rules;
+        self.compiled_regexes = compiled_regexes;
+        self.sha256_index = sha256_index;
+        self.md5_index = md5_index;
+        self.tlsh_rules = tlsh_rules;
+    }
+
+    #[allow(dead_code)]
+    pub fn sha256_index(&self) -> &HashMap<String, Rule> {
+        &self.sha256_index
+    }
+
+    #[allow(dead_code)]
+    pub fn md5_index(&self) -> &HashMap<String, Rule> {
+        &self.md5_index
+    }
+
+    #[allow(dead_code)]
+    pub fn tlsh_rules(&self) -> &[(tlsh_fixed::Tlsh, Rule)] {
+        &self.tlsh_rules
+    }
+
     /// Constructs a scanner without loading the YARA ruleset. Only hash/regex
     /// scanning is available. Used by unit tests that would otherwise spend
     /// tens of seconds compiling the full rules.yar.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn without_yara(rules: Vec<Rule>, throttle_ms: u64) -> Self {
-        let mut compiled_regexes = Vec::new();
-        for rule in &rules {
-            if let Some(ref patterns) = rule.signatures.patterns {
-                for pattern in patterns {
-                    if let Ok(re) = Regex::new(pattern) {
-                        compiled_regexes.push((rule.id.clone(), re));
-                    }
-                }
-            }
-        }
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
         Self {
             rules,
             compiled_regexes,
+            sha256_index,
+            md5_index,
+            tlsh_rules,
             yara_rules: None,
             throttle_ms,
         }
@@ -200,35 +264,30 @@ impl Scanner {
 
         // 1. Hash Check
         if let Ok((sha256, md5, tlsh_opt)) = self.calculate_hashes_and_tlsh(path_ref) {
-            for rule in &self.rules {
-                if let Some(ref hashes) = rule.signatures.hashes {
-                    let mut matched = false;
-                    if let Some(ref rule_sha256) = hashes.sha256
-                        && sha256.eq_ignore_ascii_case(rule_sha256)
-                    {
-                        matched = true;
-                    }
-                    if let Some(ref rule_md5) = hashes.md5
-                        && md5.eq_ignore_ascii_case(rule_md5)
-                    {
-                        matched = true;
-                    }
-                    if let Some(ref rule_tlsh_str) = hashes.tlsh
-                        && let Some(ref file_tlsh_str) = tlsh_opt
-                    {
-                        use std::str::FromStr;
-                        if let Ok(rule_tlsh) = tlsh_fixed::Tlsh::from_str(rule_tlsh_str)
-                            && let Ok(file_tlsh) = tlsh_fixed::Tlsh::from_str(file_tlsh_str)
+            // O(1) direct lookup for SHA-256
+            if let Some(rule) = self.sha256_index.get(&sha256.to_lowercase())
+                && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
+            {
+                triggered_rules.push(rule.clone());
+            }
+            // O(1) direct lookup for MD5
+            if let Some(rule) = self.md5_index.get(&md5.to_lowercase())
+                && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
+            {
+                triggered_rules.push(rule.clone());
+            }
+            // TLSH similarity check against pre-parsed rule hashes
+            if let Some(ref file_tlsh_str) = tlsh_opt {
+                use std::str::FromStr;
+                if let Ok(file_tlsh) = tlsh_fixed::Tlsh::from_str(file_tlsh_str) {
+                    for (rule_tlsh, rule) in &self.tlsh_rules {
+                        // A difference score of <= 50 indicates high similarity
+                        let diff_score = file_tlsh.diff(rule_tlsh, true);
+                        if diff_score <= 50
+                            && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
                         {
-                            // A difference score of <= 50 indicates high similarity
-                            let diff_score = file_tlsh.diff(&rule_tlsh, true);
-                            if diff_score <= 50 {
-                                matched = true;
-                            }
+                            triggered_rules.push(rule.clone());
                         }
-                    }
-                    if matched {
-                        triggered_rules.push(rule.clone());
                     }
                 }
             }
@@ -623,12 +682,8 @@ rule base64_packed {
         // End-to-end: a pathological rule inside a loaded ruleset must not hang
         // Scanner::scan_file; it should return a scan result (no panic).
         let rules = compile_yara(PATHOLOGICAL_BASE64_RULE);
-        let scanner = Scanner {
-            rules: vec![],
-            compiled_regexes: vec![],
-            yara_rules: Some(Arc::new(rules)),
-            throttle_ms: 0,
-        };
+        let mut scanner = Scanner::without_yara(vec![], 0);
+        scanner.yara_rules = Some(Arc::new(rules));
 
         // 1 MB is the worst case the pathological pattern can stall on; in debug
         // mode it would exceed 30s, so the timeout must abort it promptly.
@@ -666,13 +721,8 @@ rule base64_packed {
     #[test]
     fn test_calculate_hashes_and_tlsh_small() {
         // Construct Scanner directly to avoid compiling the full rules.yar (which
-        // takes ~30s in debug) — only hash calculation is exercised here.
-        let scanner = Scanner {
-            rules: vec![],
-            compiled_regexes: vec![],
-            yara_rules: None,
-            throttle_ms: 0,
-        };
+        // takes ~30s in debug): only hash calculation is exercised here.
+        let scanner = Scanner::without_yara(vec![], 0);
         let test_path = Path::new("test_small_file.txt");
         fs::write(test_path, b"too small").unwrap();
 
@@ -689,12 +739,7 @@ rule base64_packed {
 
     #[test]
     fn test_calculate_hashes_and_tlsh_sufficient_size() {
-        let scanner = Scanner {
-            rules: vec![],
-            compiled_regexes: vec![],
-            yara_rules: None,
-            throttle_ms: 0,
-        };
+        let scanner = Scanner::without_yara(vec![], 0);
         let test_path = Path::new("test_large_file.txt");
         // TLSH requires at least 50 bytes of sufficiently varied data
         let mut data = Vec::new();
@@ -705,6 +750,137 @@ rule base64_packed {
 
         let res = scanner.calculate_hashes_and_tlsh(test_path).unwrap();
         assert!(res.2.is_some()); // TLSH should be computed
+
+        let _ = fs::remove_file(test_path);
+    }
+
+    #[test]
+    fn test_hash_index_lookup_matches_expected() {
+        let test_path = Path::new("test_index_hash_match.bin");
+        fs::write(test_path, b"test content for hash matching").unwrap();
+
+        let (sha256, md5) = {
+            let temp_scanner = Scanner::without_yara(vec![], 0);
+            temp_scanner.calculate_hashes(test_path).unwrap()
+        };
+
+        let sha_rule = Rule {
+            id: "RULE-SHA".to_string(),
+            name: "Rule SHA".to_string(),
+            description: "Detects by SHA256".to_string(),
+            severity: "High".to_string(),
+            signatures: crate::config::Signatures {
+                hashes: Some(crate::config::Hashes {
+                    sha256: Some(sha256.to_uppercase()), // test case insensitivity
+                    md5: None,
+                    tlsh: None,
+                }),
+                patterns: None,
+                extension_ids: None,
+            },
+        };
+
+        let md5_rule = Rule {
+            id: "RULE-MD5".to_string(),
+            name: "Rule MD5".to_string(),
+            description: "Detects by MD5".to_string(),
+            severity: "High".to_string(),
+            signatures: crate::config::Signatures {
+                hashes: Some(crate::config::Hashes {
+                    sha256: None,
+                    md5: Some(md5.clone()),
+                    tlsh: None,
+                }),
+                patterns: None,
+                extension_ids: None,
+            },
+        };
+
+        let other_rule = Rule {
+            id: "RULE-OTHER".to_string(),
+            name: "Rule Other".to_string(),
+            description: "Non matching rule".to_string(),
+            severity: "Low".to_string(),
+            signatures: crate::config::Signatures {
+                hashes: Some(crate::config::Hashes {
+                    sha256: Some(
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                    ),
+                    md5: Some("00000000000000000000000000000000".to_string()),
+                    tlsh: None,
+                }),
+                patterns: None,
+                extension_ids: None,
+            },
+        };
+
+        let scanner =
+            Scanner::without_yara(vec![sha_rule.clone(), md5_rule.clone(), other_rule], 0);
+
+        // Verify index contents
+        assert!(scanner.sha256_index().contains_key(&sha256.to_lowercase()));
+        assert!(scanner.md5_index().contains_key(&md5.to_lowercase()));
+
+        // Scan file and verify matches
+        let result = scanner.scan_file(test_path).expect("should match rules");
+        assert_eq!(result.triggered_rules.len(), 2);
+        assert!(result.triggered_rules.iter().any(|r| r.id == "RULE-SHA"));
+        assert!(result.triggered_rules.iter().any(|r| r.id == "RULE-MD5"));
+
+        // Scan non-matching file
+        let clean_path = Path::new("test_clean_file.bin");
+        fs::write(clean_path, b"completely different clean content").unwrap();
+        let clean_result = scanner.scan_file(clean_path);
+        assert!(clean_result.is_none());
+
+        let _ = fs::remove_file(test_path);
+        let _ = fs::remove_file(clean_path);
+    }
+
+    #[test]
+    fn test_tlsh_preparsed_in_index_avoids_reparsing() {
+        let test_path = Path::new("test_tlsh_match.bin");
+        let mut data = Vec::new();
+        for i in 0..120 {
+            data.push(i as u8);
+        }
+        fs::write(test_path, &data).unwrap();
+
+        let temp_scanner = Scanner::without_yara(vec![], 0);
+        let (_, _, tlsh_opt) = temp_scanner.calculate_hashes_and_tlsh(test_path).unwrap();
+        let target_tlsh_str = tlsh_opt.expect("TLSH must be generated for >= 50 bytes");
+
+        let tlsh_rule = Rule {
+            id: "RULE-TLSH".to_string(),
+            name: "Rule TLSH".to_string(),
+            description: "Detects by TLSH".to_string(),
+            severity: "Critical".to_string(),
+            signatures: crate::config::Signatures {
+                hashes: Some(crate::config::Hashes {
+                    sha256: None,
+                    md5: None,
+                    tlsh: Some(target_tlsh_str),
+                }),
+                patterns: None,
+                extension_ids: None,
+            },
+        };
+
+        let scanner = Scanner::without_yara(vec![tlsh_rule], 0);
+
+        // Prove that the index contains the pre-parsed Tlsh struct
+        assert_eq!(scanner.tlsh_rules().len(), 1);
+        let (parsed_tlsh, rule) = &scanner.tlsh_rules()[0];
+        assert_eq!(rule.id, "RULE-TLSH");
+        assert!(!parsed_tlsh.hash().is_empty());
+
+        // Scan file and verify that matching succeeds with pre-parsed struct
+        let result = scanner
+            .scan_file(test_path)
+            .expect("should match TLSH rule");
+        assert_eq!(result.triggered_rules.len(), 1);
+        assert_eq!(result.triggered_rules[0].id, "RULE-TLSH");
 
         let _ = fs::remove_file(test_path);
     }

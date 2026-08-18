@@ -122,6 +122,58 @@ pub struct NetworkBlacklist {
     pub domains: Vec<String>,
 }
 
+impl NetworkBlacklist {
+    /// Builds an indexed runtime representation with O(1) IP lookups and
+    /// efficient subdomain suffix matching.
+    pub fn to_fast(&self) -> FastBlacklist {
+        FastBlacklist::new(self)
+    }
+}
+
+/// Runtime representation of the network blacklist optimized for hot-path lookups.
+#[derive(Debug, Clone, Default)]
+pub struct FastBlacklist {
+    pub ips: std::collections::HashSet<String>,
+    pub domains: std::collections::HashSet<String>,
+}
+
+impl FastBlacklist {
+    pub fn new(blacklist: &NetworkBlacklist) -> Self {
+        let ips: std::collections::HashSet<String> = blacklist.ips.iter().cloned().collect();
+        let domains: std::collections::HashSet<String> = blacklist
+            .domains
+            .iter()
+            .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+            .filter(|d| !d.is_empty() && d.contains('.'))
+            .collect();
+        Self { ips, domains }
+    }
+
+    pub fn contains_ip(&self, ip: &str) -> bool {
+        self.ips.contains(ip)
+    }
+
+    pub fn match_domain(&self, host: &str) -> Option<String> {
+        let host = host.trim().trim_end_matches('.').to_lowercase();
+        if host.is_empty() {
+            return None;
+        }
+        let mut current = host.as_str();
+        loop {
+            if self.domains.contains(current) {
+                return Some(current.to_string());
+            }
+            match current.find('.') {
+                Some(idx) => {
+                    current = &current[idx + 1..];
+                }
+                None => break,
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RulesConfig {
     pub settings: Option<Settings>,
@@ -342,6 +394,21 @@ pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig, Box<dyn std::e
     Ok(config)
 }
 
+/// Loads and validates rules from disk, updating the shared thread-safe config
+/// only when verification succeeds. If loading or signature verification fails,
+/// the existing config remains active (fail-safe).
+pub fn reload_rules<P: AsRef<Path>>(
+    path: P,
+    rules_lock: &std::sync::RwLock<RulesConfig>,
+) -> Result<RulesConfig, Box<dyn std::error::Error>> {
+    let new_config = load_rules(path)?;
+    let mut guard = rules_lock
+        .write()
+        .map_err(|e| format!("Gagal mendapatkan write lock: {}", e))?;
+    *guard = new_config.clone();
+    Ok(new_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +567,99 @@ mod tests {
             effective_default_action(&runtime, &rules_empty),
             "quarantine"
         );
+    }
+
+    #[test]
+    fn test_reload_rules_updates_shared_rwlock_on_valid_signature() {
+        use std::sync::{Arc, RwLock};
+
+        let dir = temp_dir("reload_valid");
+        let rules_path = dir.join("rules.json");
+        let (key_path, _) = gen_rules_keypair(&dir).unwrap();
+
+        let rules_v1 = r#"{
+            "settings": { "default_action": "quarantine" },
+            "rules": [],
+            "network_blacklist": { "ips": ["1.1.1.1"], "domains": ["evil.com"] }
+        }"#;
+        fs::write(&rules_path, rules_v1).unwrap();
+        sign_rules(&rules_path, &key_path).unwrap();
+
+        let loaded_v1 = load_rules(&rules_path).unwrap();
+        let shared_config = Arc::new(RwLock::new(loaded_v1));
+
+        // Verify initial state (Version A)
+        {
+            let guard = shared_config.read().unwrap();
+            assert_eq!(guard.network_blacklist.ips, vec!["1.1.1.1"]);
+            assert_eq!(guard.network_blacklist.domains, vec!["evil.com"]);
+        }
+
+        // Update file to Version B with a valid signature
+        let rules_v2 = r#"{
+            "settings": { "default_action": "delete" },
+            "rules": [],
+            "network_blacklist": { "ips": ["2.2.2.2", "3.3.3.3"], "domains": ["malware.org"] }
+        }"#;
+        fs::write(&rules_path, rules_v2).unwrap();
+        sign_rules(&rules_path, &key_path).unwrap();
+
+        // Perform reload
+        let reload_result = reload_rules(&rules_path, &shared_config);
+        assert!(reload_result.is_ok());
+
+        // Verify that the shared config now reflects Version B
+        {
+            let guard = shared_config.read().unwrap();
+            assert_eq!(guard.network_blacklist.ips, vec!["2.2.2.2", "3.3.3.3"]);
+            assert_eq!(guard.network_blacklist.domains, vec!["malware.org"]);
+            assert_eq!(
+                guard.settings.as_ref().unwrap().default_action.as_deref(),
+                Some("delete")
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_rules_invalid_signature_preserves_previous_config() {
+        use std::sync::{Arc, RwLock};
+
+        let dir = temp_dir("reload_invalid");
+        let rules_path = dir.join("rules.json");
+        let (key_path, _) = gen_rules_keypair(&dir).unwrap();
+
+        let rules_v1 = r#"{
+            "settings": { "default_action": "quarantine" },
+            "rules": [],
+            "network_blacklist": { "ips": ["1.1.1.1"], "domains": ["evil.com"] }
+        }"#;
+        fs::write(&rules_path, rules_v1).unwrap();
+        sign_rules(&rules_path, &key_path).unwrap();
+
+        let loaded_v1 = load_rules(&rules_path).unwrap();
+        let shared_config = Arc::new(RwLock::new(loaded_v1));
+
+        // Overwrite rules.json with Version B without re-signing (invalid signature for new content)
+        let rules_v2 = r#"{
+            "settings": { "default_action": "delete" },
+            "rules": [],
+            "network_blacklist": { "ips": ["9.9.9.9"], "domains": ["hacked.net"] }
+        }"#;
+        fs::write(&rules_path, rules_v2).unwrap();
+
+        // Perform reload, expect failure
+        let reload_result = reload_rules(&rules_path, &shared_config);
+        assert!(reload_result.is_err());
+
+        // Verify that the shared config is still Version A (unchanged)
+        {
+            let guard = shared_config.read().unwrap();
+            assert_eq!(guard.network_blacklist.ips, vec!["1.1.1.1"]);
+            assert_eq!(guard.network_blacklist.domains, vec!["evil.com"]);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -268,7 +268,7 @@ fn main() {
             // Shared components for threads
             let scanner_arc = Arc::new(scanner);
             let quarantine_arc = Arc::new(quarantine_mgr.clone());
-            let rules_config_arc = Arc::new(rules_config.clone());
+            let rules_config_arc = Arc::new(RwLock::new(rules_config.clone()));
 
             // 0. Start Web UI Dashboard server automatically in background (on port 8686)
             web::start_web_server(
@@ -276,7 +276,7 @@ fn main() {
                 8686,
                 (*scanner_arc).clone(),
                 quarantine_mgr.clone(),
-                rules_config.clone(),
+                rules_config_arc.clone(),
                 default_action.clone(),
             );
 
@@ -293,9 +293,13 @@ fn main() {
                     );
                     loop {
                         if let Ok(conns) = network::get_active_connections() {
+                            let fast_blacklist = {
+                                let cfg = net_config.read().unwrap();
+                                cfg.network_blacklist.to_fast()
+                            };
                             for conn in conns {
                                 // Check if remote IP is in blacklist
-                                if net_config.network_blacklist.ips.contains(&conn.remote_ip) {
+                                if fast_blacklist.contains_ip(&conn.remote_ip) {
                                     log_detection(&format!(
                                         "[!] DETEKSI JARINGAN: Koneksi keluar ke IP terlarang {} dideteksi!",
                                         conn.remote_ip
@@ -394,13 +398,22 @@ fn main() {
                     }
                 };
 
+                let (ips, domains, ebpf_sha) = {
+                    let cfg = net_config.read().unwrap();
+                    (
+                        cfg.network_blacklist.ips.clone(),
+                        cfg.network_blacklist.domains.clone(),
+                        cfg.ebpf_sha256.clone(),
+                    )
+                };
+
                 match network::init_ebpf_monitor(
-                    &net_config.network_blacklist.ips,
-                    &net_config.network_blacklist.domains,
+                    &ips,
+                    &domains,
                     (*net_scanner).clone(),
                     (*net_quarantine).clone(),
                     &net_action,
-                    net_config.ebpf_sha256.as_deref(),
+                    ebpf_sha.as_deref(),
                     contain_strategy,
                 ) {
                     Ok(mut ebpf_monitor) => {
@@ -470,15 +483,17 @@ fn main() {
             let ext_handle = thread::spawn(move || {
                 log_message("[*] Monitor Browser: Memulai pengecekan ekstensi berkala...");
                 loop {
-                    let blacklist_ids = &ext_config
-                        .rules
-                        .iter()
-                        .filter_map(|r| r.signatures.extension_ids.clone())
-                        .flatten()
-                        .collect::<Vec<String>>();
+                    let blacklist_ids = {
+                        let cfg = ext_config.read().unwrap();
+                        cfg.rules
+                            .iter()
+                            .filter_map(|r| r.signatures.extension_ids.clone())
+                            .flatten()
+                            .collect::<Vec<String>>()
+                    };
 
                     if !blacklist_ids.is_empty() {
-                        let detected = browser::scan_browser_extensions(blacklist_ids);
+                        let detected = browser::scan_browser_extensions(&blacklist_ids);
                         for item in detected {
                             log_detection(&format!(
                                 "[!] PERINGATAN BROWSER GUARD: Ekstensi berbahaya terdeteksi: {}",
@@ -495,7 +510,7 @@ fn main() {
             let miner_scanner = scanner_arc.clone();
             let miner_quarantine = quarantine_arc.clone();
             let miner_action = default_action.clone();
-            let miner_blacklist = rules_config.network_blacklist.ips.clone();
+            let miner_config = rules_config_arc.clone();
             let miner_require_secondary = runtime_config
                 .miner_detection_require_secondary_signal
                 .unwrap_or(true);
@@ -590,11 +605,14 @@ fn main() {
                             }
                         }
                     }
-
                     // Check 2: Active connections to mining ports
                     if let Ok(conns) = network::get_active_connections() {
                         let whitelist: HashSet<String> =
                             crate::utils::load_whitelist().into_iter().collect();
+                        let fast_blacklist = {
+                            let cfg = miner_config.read().unwrap();
+                            cfg.network_blacklist.to_fast()
+                        };
                         for conn in conns {
                             if network::is_mining_port(conn.remote_port) {
                                 log_detection(&format!(
@@ -611,7 +629,7 @@ fn main() {
                                 let should_act = miner_connection_warrants_action(
                                     &conn.remote_ip,
                                     exe_path.as_deref(),
-                                    &miner_blacklist,
+                                    &fast_blacklist,
                                     &whitelist,
                                     miner_require_secondary,
                                 );
@@ -799,18 +817,20 @@ fn main() {
                 .and_then(|m| m.modified())
                 .unwrap_or_else(|_| std::time::SystemTime::now());
 
+            let integrity_config = rules_config_arc.clone();
+            let integrity_rules_path = rules_file_path.clone();
             let integrity_handle = thread::spawn(move || {
                 log_message("[*] Monitor Integritas: Memulai pemantauan rules.json...");
                 loop {
                     thread::sleep(Duration::from_secs(5));
-                    if let Ok(meta) = std::fs::metadata(&rules_file_path)
+                    if let Ok(meta) = std::fs::metadata(&integrity_rules_path)
                         && let Ok(modified) = meta.modified()
                         && modified != last_modified
                     {
                         log_message(
                             "[*] Terdeteksi perubahan pada rules.json. Memverifikasi tanda tangan...",
                         );
-                        match config::verify_rules_signature(&rules_file_path) {
+                        match config::reload_rules(&integrity_rules_path, &integrity_config) {
                             Ok(_) => {
                                 log_message(
                                     "[+] Tanda tangan rules.json valid. Memuat ulang rules...",
@@ -819,7 +839,7 @@ fn main() {
                             }
                             Err(e) => {
                                 log_detection(&format!(
-                                    "[!] PERINGATAN KEBOCORAN/INTEGRITAS: rules.json diubah secara tidak sah! Kesalahan: {}. Perubahan ditolak.",
+                                    "[!] PERINGATAN KEBOCORAN/INTEGRITAS: rules.json diubah secara tidak sah atau rusak! Kesalahan: {}. Perubahan ditolak.",
                                     e
                                 ));
                                 last_modified = modified;
@@ -830,6 +850,8 @@ fn main() {
             });
 
             // 6. Thread Auto Update Threat Feed
+            let feed_config = rules_config_arc.clone();
+            let feed_rules_path = rules_file_path.clone();
             let feed_handle = thread::spawn(move || {
                 log_message(
                     "[*] Auto Update Threat Feed: Memulai pembaharuan otomatis berkala (setiap 24 jam)...",
@@ -837,8 +859,23 @@ fn main() {
                 loop {
                     // Sleep 30s before first run to let main daemon launch completely
                     thread::sleep(Duration::from_secs(30));
-                    if let Err(e) = feed::update_threat_feed() {
-                        log_message(&format!("[-] Gagal memperbarui threat feed: {}", e));
+                    match feed::update_threat_feed() {
+                        Ok(_) => match config::reload_rules(&feed_rules_path, &feed_config) {
+                            Ok(_) => {
+                                log_message(
+                                    "[+] Rules berhasil dimuat ulang ke memori setelah update feed.",
+                                );
+                            }
+                            Err(e) => {
+                                log_message(&format!(
+                                    "[-] Gagal memuat ulang rules setelah update feed: {}",
+                                    e
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            log_message(&format!("[-] Gagal memperbarui threat feed: {}", e));
+                        }
                     }
                     // Wait 24 hours
                     thread::sleep(Duration::from_secs(24 * 3600));
@@ -871,7 +908,7 @@ fn main() {
                 port,
                 scanner,
                 quarantine_mgr,
-                rules_config,
+                Arc::new(RwLock::new(rules_config)),
                 default_action,
             );
 
@@ -1019,14 +1056,14 @@ fn is_suspicious_temp_path(path: &str) -> bool {
 fn miner_connection_warrants_action(
     remote_ip: &str,
     exe_path: Option<&str>,
-    blacklist_ips: &[String],
+    blacklist: &config::FastBlacklist,
     whitelist: &HashSet<String>,
     require_secondary_signal: bool,
 ) -> bool {
     if !require_secondary_signal {
         return true;
     }
-    let ip_blacklisted = blacklist_ips.iter().any(|ip| ip == remote_ip);
+    let ip_blacklisted = blacklist.contains_ip(remote_ip);
     let suspicious_path = exe_path.map(is_suspicious_temp_path).unwrap_or(false);
     let whitelisted = exe_path.map(|p| whitelist.contains(p)).unwrap_or(false);
     (ip_blacklisted || suspicious_path) && !whitelisted
@@ -1040,12 +1077,20 @@ mod tests {
         paths.iter().map(|p| p.to_string()).collect()
     }
 
+    fn fast_blacklist_of(ips: &[&str]) -> config::FastBlacklist {
+        config::NetworkBlacklist {
+            ips: ips.iter().map(|s| s.to_string()).collect(),
+            domains: vec![],
+        }
+        .to_fast()
+    }
+
     #[test]
     fn test_miner_port_only_connection_is_alert_only() {
         // A connection to a mining port with no second signal (no blacklisted IP,
         // no suspicious path) must NOT trigger destructive actions by default.
         let whitelist = HashSet::new();
-        let blacklist: Vec<String> = vec![];
+        let blacklist = fast_blacklist_of(&[]);
         assert!(network::is_mining_port(3333));
         assert!(!miner_connection_warrants_action(
             "203.0.113.1",
@@ -1065,7 +1110,7 @@ mod tests {
 
     #[test]
     fn test_miner_blacklisted_ip_triggers_action() {
-        let blacklist = vec!["185.112.146.12".to_string()];
+        let blacklist = fast_blacklist_of(&["185.112.146.12"]);
         assert!(miner_connection_warrants_action(
             "185.112.146.12",
             None,
@@ -1077,6 +1122,7 @@ mod tests {
 
     #[test]
     fn test_miner_suspicious_temp_path_triggers_action() {
+        let empty_blacklist = fast_blacklist_of(&[]);
         for path in [
             "/tmp/xmrig",
             "/var/tmp/xmrig",
@@ -1090,7 +1136,7 @@ mod tests {
             assert!(miner_connection_warrants_action(
                 "203.0.113.1",
                 Some(path),
-                &[],
+                &empty_blacklist,
                 &HashSet::new(),
                 true
             ));
@@ -1101,10 +1147,11 @@ mod tests {
     fn test_miner_action_respects_whitelist() {
         // Even with a secondary signal, an explicitly whitelisted executable is spared.
         let whitelist = whitelist_of(&["/tmp/xmrig"]);
+        let empty_blacklist = fast_blacklist_of(&[]);
         assert!(!miner_connection_warrants_action(
             "203.0.113.1",
             Some("/tmp/xmrig"),
-            &[],
+            &empty_blacklist,
             &whitelist,
             true
         ));
@@ -1113,10 +1160,11 @@ mod tests {
     #[test]
     fn test_miner_disabled_secondary_signal_acts_on_port() {
         // Opt-out via config.json restores the legacy port-only behavior.
+        let empty_blacklist = fast_blacklist_of(&[]);
         assert!(miner_connection_warrants_action(
             "203.0.113.1",
             None,
-            &[],
+            &empty_blacklist,
             &HashSet::new(),
             false
         ));
