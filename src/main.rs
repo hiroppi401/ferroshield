@@ -266,7 +266,7 @@ fn main() {
             }
 
             // Shared components for threads
-            let scanner_arc = Arc::new(scanner);
+            let scanner_arc = Arc::new(RwLock::new(scanner));
             let quarantine_arc = Arc::new(quarantine_mgr.clone());
             let rules_config_arc = Arc::new(RwLock::new(rules_config.clone()));
 
@@ -274,7 +274,7 @@ fn main() {
             web::start_web_server(
                 "127.0.0.1",
                 8686,
-                (*scanner_arc).clone(),
+                scanner_arc.clone(),
                 quarantine_mgr.clone(),
                 rules_config_arc.clone(),
                 default_action.clone(),
@@ -334,9 +334,11 @@ fn main() {
                                                     );
                                                 }
                                             } else {
-                                                if let Ok((sha, _)) =
-                                                    net_scanner.calculate_hashes(proc_path)
-                                                {
+                                                let hash_res = {
+                                                    let s = net_scanner.read().unwrap();
+                                                    s.calculate_hashes(proc_path)
+                                                };
+                                                if let Ok((sha, _)) = hash_res {
                                                     let _ = net_quarantine.quarantine_file(
                                                         proc_path,
                                                         &sha,
@@ -407,10 +409,15 @@ fn main() {
                     )
                 };
 
+                let scanner_snapshot = {
+                    let s = net_scanner.read().unwrap();
+                    s.clone()
+                };
+
                 match network::init_ebpf_monitor(
                     &ips,
                     &domains,
-                    (*net_scanner).clone(),
+                    scanner_snapshot,
                     (*net_quarantine).clone(),
                     &net_action,
                     ebpf_sha.as_deref(),
@@ -442,7 +449,7 @@ fn main() {
             });
 
             // 2. Thread Browser Guard - Downloads Watcher
-            let watch_scanner = (*scanner_arc).clone();
+            let watch_scanner_arc = scanner_arc.clone();
             let watch_quarantine = (*quarantine_arc).clone();
             let watch_action = default_action.clone();
             let watch_custom_path = downloads_dir.clone();
@@ -454,10 +461,14 @@ fn main() {
 
                     if !downloads_dirs.is_empty() {
                         logged_not_found = false;
+                        let scanner_snapshot = {
+                            let s = watch_scanner_arc.read().unwrap();
+                            s.clone()
+                        };
                         if let Err(e) = browser::watch_downloads_directories(
                             &downloads_dirs,
                             custom_path,
-                            watch_scanner.clone(),
+                            scanner_snapshot,
                             watch_quarantine.clone(),
                             &watch_action,
                         ) {
@@ -507,7 +518,7 @@ fn main() {
             });
 
             // 4. Thread Cryptominer & Suspicious Process Guard
-            let miner_scanner = scanner_arc.clone();
+            let miner_scanner_arc = scanner_arc.clone();
             let miner_quarantine = quarantine_arc.clone();
             let miner_action = default_action.clone();
             let miner_config = rules_config_arc.clone();
@@ -561,14 +572,18 @@ fn main() {
                                     ));
                                 }
                             } else {
-                                if let Ok((sha, _)) = miner_scanner.calculate_hashes(proc_path) {
+                                let hash_res = {
+                                    let s = miner_scanner_arc.read().unwrap();
+                                    s.calculate_hashes(proc_path)
+                                };
+                                if let Ok((sha, _)) = hash_res {
                                     let _ = miner_quarantine.quarantine_file(
                                         proc_path,
                                         &sha,
                                         "SUSPICIOUS-TEMP-PATH",
                                     );
                                     log_message(&format!(
-                                        "[+] File malware {} dipindahkan ke folder karantina.",
+                                        "[+] File malware {} berhasil dikarantina.",
                                         path_str
                                     ));
                                 }
@@ -653,9 +668,11 @@ fn main() {
                                         if miner_action == "delete" {
                                             let _ = std::fs::remove_file(proc_path);
                                         } else {
-                                            if let Ok((sha, _)) =
-                                                miner_scanner.calculate_hashes(proc_path)
-                                            {
+                                            let hash_res = {
+                                                let s = miner_scanner_arc.read().unwrap();
+                                                s.calculate_hashes(proc_path)
+                                            };
+                                            if let Ok((sha, _)) = hash_res {
                                                 let _ = miner_quarantine.quarantine_file(
                                                     proc_path,
                                                     &sha,
@@ -764,14 +781,20 @@ fn main() {
                                                 if proc_path.exists() && proc_path.is_file() {
                                                     if miner_action == "delete" {
                                                         let _ = std::fs::remove_file(proc_path);
-                                                    } else if let Ok((sha, _)) =
-                                                        miner_scanner.calculate_hashes(proc_path)
-                                                    {
-                                                        let _ = miner_quarantine.quarantine_file(
-                                                            proc_path,
-                                                            &sha,
-                                                            "BEHAVIORAL-MINER-CPU",
-                                                        );
+                                                    } else {
+                                                        let hash_res = {
+                                                            let s =
+                                                                miner_scanner_arc.read().unwrap();
+                                                            s.calculate_hashes(proc_path)
+                                                        };
+                                                        if let Ok((sha, _)) = hash_res {
+                                                            let _ = miner_quarantine
+                                                                .quarantine_file(
+                                                                    proc_path,
+                                                                    &sha,
+                                                                    "BEHAVIORAL-MINER-CPU",
+                                                                );
+                                                        }
                                                     }
                                                 }
 
@@ -818,6 +841,7 @@ fn main() {
                 .unwrap_or_else(|_| std::time::SystemTime::now());
 
             let integrity_config = rules_config_arc.clone();
+            let integrity_scanner = scanner_arc.clone();
             let integrity_rules_path = rules_file_path.clone();
             let integrity_handle = thread::spawn(move || {
                 log_message("[*] Monitor Integritas: Memulai pemantauan rules.json...");
@@ -830,7 +854,11 @@ fn main() {
                         log_message(
                             "[*] Terdeteksi perubahan pada rules.json. Memverifikasi tanda tangan...",
                         );
-                        match config::reload_rules(&integrity_rules_path, &integrity_config) {
+                        match config::reload_rules(
+                            &integrity_rules_path,
+                            &integrity_config,
+                            &integrity_scanner,
+                        ) {
                             Ok(_) => {
                                 log_message(
                                     "[+] Tanda tangan rules.json valid. Memuat ulang rules...",
@@ -851,6 +879,7 @@ fn main() {
 
             // 6. Thread Auto Update Threat Feed
             let feed_config = rules_config_arc.clone();
+            let feed_scanner = scanner_arc.clone();
             let feed_rules_path = rules_file_path.clone();
             let feed_handle = thread::spawn(move || {
                 log_message(
@@ -860,7 +889,11 @@ fn main() {
                     // Sleep 30s before first run to let main daemon launch completely
                     thread::sleep(Duration::from_secs(30));
                     match feed::update_threat_feed() {
-                        Ok(_) => match config::reload_rules(&feed_rules_path, &feed_config) {
+                        Ok(_) => match config::reload_rules(
+                            &feed_rules_path,
+                            &feed_config,
+                            &feed_scanner,
+                        ) {
                             Ok(_) => {
                                 log_message(
                                     "[+] Rules berhasil dimuat ulang ke memori setelah update feed.",
@@ -906,7 +939,7 @@ fn main() {
             web::start_web_server(
                 "127.0.0.1",
                 port,
-                scanner,
+                Arc::new(RwLock::new(scanner)),
                 quarantine_mgr,
                 Arc::new(RwLock::new(rules_config)),
                 default_action,

@@ -129,7 +129,6 @@ impl Scanner {
     }
 
     /// Rebuilds all derived hash, TLSH, and regex indexes when rules are reloaded.
-    #[allow(dead_code)]
     pub fn update_rules(&mut self, rules: Vec<Rule>) {
         let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
         self.rules = rules;
@@ -139,17 +138,17 @@ impl Scanner {
         self.tlsh_rules = tlsh_rules;
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn sha256_index(&self) -> &HashMap<String, Rule> {
         &self.sha256_index
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn md5_index(&self) -> &HashMap<String, Rule> {
         &self.md5_index
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn tlsh_rules(&self) -> &[(tlsh_fixed::Tlsh, Rule)] {
         &self.tlsh_rules
     }
@@ -157,7 +156,7 @@ impl Scanner {
     /// Constructs a scanner without loading the YARA ruleset. Only hash/regex
     /// scanning is available. Used by unit tests that would otherwise spend
     /// tens of seconds compiling the full rules.yar.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn without_yara(rules: Vec<Rule>, throttle_ms: u64) -> Self {
         let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
         Self {

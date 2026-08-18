@@ -247,7 +247,7 @@ fn enforce_request_guards(
 pub fn start_web_server(
     host: &str,
     port: u16,
-    scanner: Scanner,
+    scanner: Arc<RwLock<Scanner>>,
     quarantine_mgr: QuarantineManager,
     rules_config: Arc<RwLock<RulesConfig>>,
     default_action: String,
@@ -443,6 +443,11 @@ pub fn start_web_server(
                 continue;
             }
 
+            let current_scanner = match scanner.read() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+
             let current_rules = match rules_config.read() {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
@@ -451,7 +456,7 @@ pub fn start_web_server(
             let response = match handle_request(
                 &mut request,
                 &WebContext {
-                    scanner: &scanner,
+                    scanner: &current_scanner,
                     quarantine_mgr: &quarantine_mgr,
                     rules_config: &current_rules,
                     default_action: &default_action,

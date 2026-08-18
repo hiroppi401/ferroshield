@@ -395,17 +395,27 @@ pub fn load_rules<P: AsRef<Path>>(path: P) -> Result<RulesConfig, Box<dyn std::e
 }
 
 /// Loads and validates rules from disk, updating the shared thread-safe config
-/// only when verification succeeds. If loading or signature verification fails,
-/// the existing config remains active (fail-safe).
+/// and the scanner's derived hash/TLSH indexes atomically only when verification
+/// succeeds. If loading or signature verification fails, the existing config and
+/// scanner indexes remain active (fail-safe).
 pub fn reload_rules<P: AsRef<Path>>(
     path: P,
     rules_lock: &std::sync::RwLock<RulesConfig>,
+    scanner_lock: &std::sync::RwLock<crate::scanner::Scanner>,
 ) -> Result<RulesConfig, Box<dyn std::error::Error>> {
     let new_config = load_rules(path)?;
-    let mut guard = rules_lock
-        .write()
-        .map_err(|e| format!("Gagal mendapatkan write lock: {}", e))?;
-    *guard = new_config.clone();
+    {
+        let mut guard = rules_lock
+            .write()
+            .map_err(|e| format!("Gagal mendapatkan write lock rules: {}", e))?;
+        *guard = new_config.clone();
+    }
+    {
+        let mut scanner_guard = scanner_lock
+            .write()
+            .map_err(|e| format!("Gagal mendapatkan write lock scanner: {}", e))?;
+        scanner_guard.update_rules(new_config.rules.clone());
+    }
     Ok(new_config)
 }
 
@@ -587,6 +597,8 @@ mod tests {
 
         let loaded_v1 = load_rules(&rules_path).unwrap();
         let shared_config = Arc::new(RwLock::new(loaded_v1));
+        let scanner = crate::scanner::Scanner::without_yara(vec![], 0);
+        let shared_scanner = Arc::new(RwLock::new(scanner));
 
         // Verify initial state (Version A)
         {
@@ -605,7 +617,7 @@ mod tests {
         sign_rules(&rules_path, &key_path).unwrap();
 
         // Perform reload
-        let reload_result = reload_rules(&rules_path, &shared_config);
+        let reload_result = reload_rules(&rules_path, &shared_config, &shared_scanner);
         assert!(reload_result.is_ok());
 
         // Verify that the shared config now reflects Version B
@@ -640,6 +652,8 @@ mod tests {
 
         let loaded_v1 = load_rules(&rules_path).unwrap();
         let shared_config = Arc::new(RwLock::new(loaded_v1));
+        let scanner = crate::scanner::Scanner::without_yara(vec![], 0);
+        let shared_scanner = Arc::new(RwLock::new(scanner));
 
         // Overwrite rules.json with Version B without re-signing (invalid signature for new content)
         let rules_v2 = r#"{
@@ -650,7 +664,7 @@ mod tests {
         fs::write(&rules_path, rules_v2).unwrap();
 
         // Perform reload, expect failure
-        let reload_result = reload_rules(&rules_path, &shared_config);
+        let reload_result = reload_rules(&rules_path, &shared_config, &shared_scanner);
         assert!(reload_result.is_err());
 
         // Verify that the shared config is still Version A (unchanged)
@@ -658,6 +672,96 @@ mod tests {
             let guard = shared_config.read().unwrap();
             assert_eq!(guard.network_blacklist.ips, vec!["1.1.1.1"]);
             assert_eq!(guard.network_blacklist.domains, vec!["evil.com"]);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_rules_updates_scanner_index_e2e() {
+        use sha2::{Digest, Sha256};
+        use std::sync::{Arc, RwLock};
+
+        let dir = temp_dir("scanner_reload_e2e");
+        let rules_path = dir.join("rules.json");
+        let (key_path, _) = gen_rules_keypair(&dir).unwrap();
+
+        // Create a test file to scan
+        let target_file = dir.join("sample_malware.bin");
+        fs::write(&target_file, b"malicious binary payload version B").unwrap();
+
+        // Calculate SHA-256 of target_file
+        let mut hasher = Sha256::new();
+        hasher.update(b"malicious binary payload version B");
+        let target_sha256 = format!("{:x}", hasher.finalize());
+
+        // Version A: rules list is empty
+        let rules_v1 = r#"{
+            "settings": { "default_action": "quarantine" },
+            "rules": [],
+            "network_blacklist": { "ips": [], "domains": [] }
+        }"#;
+        fs::write(&rules_path, rules_v1).unwrap();
+        sign_rules(&rules_path, &key_path).unwrap();
+
+        let loaded_v1 = load_rules(&rules_path).unwrap();
+        let shared_config = Arc::new(RwLock::new(loaded_v1));
+        let scanner = crate::scanner::Scanner::without_yara(vec![], 0);
+        let shared_scanner = Arc::new(RwLock::new(scanner));
+
+        // Before reload: scanning target_file must NOT detect anything
+        {
+            let scanner_guard = shared_scanner.read().unwrap();
+            let scan_res = scanner_guard.scan_file(&target_file);
+            assert!(
+                scan_res.is_none(),
+                "Target file must not be detected under Version A rules"
+            );
+        }
+
+        // Version B: contains a rule with target_sha256
+        let rules_v2 = format!(
+            r#"{{
+                "settings": {{ "default_action": "quarantine" }},
+                "rules": [
+                    {{
+                        "id": "RULE-TEST-V2",
+                        "name": "Test Rule V2",
+                        "description": "Detects payload via SHA256",
+                        "severity": "Critical",
+                        "signatures": {{
+                            "hashes": {{
+                                "sha256": "{}",
+                                "md5": null,
+                                "tlsh": null
+                            }},
+                            "patterns": null,
+                            "extension_ids": null
+                        }}
+                    }}
+                ],
+                "network_blacklist": {{ "ips": [], "domains": [] }}
+            }}"#,
+            target_sha256
+        );
+        fs::write(&rules_path, rules_v2).unwrap();
+        sign_rules(&rules_path, &key_path).unwrap();
+
+        // Reload rules and scanner atomically
+        let reload_res = reload_rules(&rules_path, &shared_config, &shared_scanner);
+        assert!(reload_res.is_ok());
+
+        // After reload: scanning target_file MUST detect the rule via updated scanner index
+        {
+            let scanner_guard = shared_scanner.read().unwrap();
+            let scan_res = scanner_guard.scan_file(&target_file);
+            assert!(
+                scan_res.is_some(),
+                "Target file must be detected after reload to Version B"
+            );
+            let result = scan_res.unwrap();
+            assert_eq!(result.triggered_rules.len(), 1);
+            assert_eq!(result.triggered_rules[0].id, "RULE-TEST-V2");
         }
 
         let _ = fs::remove_dir_all(&dir);
