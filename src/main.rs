@@ -9,6 +9,9 @@ mod scanner;
 mod utils;
 mod web;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use config::load_rules;
 use quarantine::QuarantineManager;
 use scanner::Scanner;

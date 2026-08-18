@@ -1,6 +1,6 @@
 use crate::config::Rule;
 use md5::Context as Md5Context;
-use regex::Regex;
+use regex::bytes::Regex as BytesRegex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -28,13 +28,13 @@ pub struct ScanResult {
 }
 
 type RuleIndexes = (
-    Vec<(String, Regex)>,
-    HashMap<String, Rule>,
-    HashMap<String, Rule>,
-    Vec<(tlsh_fixed::Tlsh, Rule)>,
+    Vec<(String, BytesRegex)>,
+    HashMap<String, Arc<Rule>>,
+    HashMap<String, Arc<Rule>>,
+    Vec<(tlsh_fixed::Tlsh, Arc<Rule>)>,
 );
 
-fn build_rule_indexes(rules: &[Rule]) -> RuleIndexes {
+fn build_rule_indexes(rules: &[Arc<Rule>]) -> RuleIndexes {
     use std::str::FromStr;
 
     let mut compiled_regexes = Vec::new();
@@ -45,7 +45,7 @@ fn build_rule_indexes(rules: &[Rule]) -> RuleIndexes {
     for rule in rules {
         if let Some(ref patterns) = rule.signatures.patterns {
             for pattern in patterns {
-                if let Ok(re) = Regex::new(pattern) {
+                if let Ok(re) = BytesRegex::new(pattern) {
                     compiled_regexes.push((rule.id.clone(), re));
                 }
             }
@@ -54,19 +54,19 @@ fn build_rule_indexes(rules: &[Rule]) -> RuleIndexes {
             if let Some(ref sha) = hashes.sha256 {
                 let s = sha.trim().to_lowercase();
                 if !s.is_empty() {
-                    sha256_index.insert(s, rule.clone());
+                    sha256_index.insert(s, Arc::clone(rule));
                 }
             }
             if let Some(ref md5_hash) = hashes.md5 {
                 let m = md5_hash.trim().to_lowercase();
                 if !m.is_empty() {
-                    md5_index.insert(m, rule.clone());
+                    md5_index.insert(m, Arc::clone(rule));
                 }
             }
             if let Some(ref tlsh_str) = hashes.tlsh
                 && let Ok(tlsh) = tlsh_fixed::Tlsh::from_str(tlsh_str.trim())
             {
-                tlsh_rules.push((tlsh, rule.clone()));
+                tlsh_rules.push((tlsh, Arc::clone(rule)));
             }
         }
     }
@@ -76,11 +76,11 @@ fn build_rule_indexes(rules: &[Rule]) -> RuleIndexes {
 
 #[derive(Clone)]
 pub struct Scanner {
-    rules: Vec<Rule>,
-    compiled_regexes: Vec<(String, Regex)>, // (rule_id, compiled_regex)
-    sha256_index: HashMap<String, Rule>,
-    md5_index: HashMap<String, Rule>,
-    tlsh_rules: Vec<(tlsh_fixed::Tlsh, Rule)>,
+    rules: Vec<Arc<Rule>>,
+    compiled_regexes: Vec<(String, BytesRegex)>, // (rule_id, compiled_regex)
+    sha256_index: HashMap<String, Arc<Rule>>,
+    md5_index: HashMap<String, Arc<Rule>>,
+    tlsh_rules: Vec<(tlsh_fixed::Tlsh, Arc<Rule>)>,
     yara_rules: Option<Arc<YaraRules>>,
     throttle_ms: u64,
 }
@@ -91,7 +91,9 @@ impl Scanner {
         throttle_ms: u64,
         expected_rules_yar_sha256: Option<&str>,
     ) -> Self {
-        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
+        let arc_rules: Vec<Arc<Rule>> = rules.into_iter().map(Arc::new).collect();
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) =
+            build_rule_indexes(&arc_rules);
 
         // Attempt to load and compile rules.yar if it exists
         let yara_rules = if Path::new("rules.yar").exists() {
@@ -118,7 +120,7 @@ impl Scanner {
         };
 
         Self {
-            rules,
+            rules: arc_rules,
             compiled_regexes,
             sha256_index,
             md5_index,
@@ -130,8 +132,10 @@ impl Scanner {
 
     /// Rebuilds all derived hash, TLSH, and regex indexes when rules are reloaded.
     pub fn update_rules(&mut self, rules: Vec<Rule>) {
-        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
-        self.rules = rules;
+        let arc_rules: Vec<Arc<Rule>> = rules.into_iter().map(Arc::new).collect();
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) =
+            build_rule_indexes(&arc_rules);
+        self.rules = arc_rules;
         self.compiled_regexes = compiled_regexes;
         self.sha256_index = sha256_index;
         self.md5_index = md5_index;
@@ -139,17 +143,17 @@ impl Scanner {
     }
 
     #[cfg(test)]
-    pub fn sha256_index(&self) -> &HashMap<String, Rule> {
+    pub fn sha256_index(&self) -> &HashMap<String, Arc<Rule>> {
         &self.sha256_index
     }
 
     #[cfg(test)]
-    pub fn md5_index(&self) -> &HashMap<String, Rule> {
+    pub fn md5_index(&self) -> &HashMap<String, Arc<Rule>> {
         &self.md5_index
     }
 
     #[cfg(test)]
-    pub fn tlsh_rules(&self) -> &[(tlsh_fixed::Tlsh, Rule)] {
+    pub fn tlsh_rules(&self) -> &[(tlsh_fixed::Tlsh, Arc<Rule>)] {
         &self.tlsh_rules
     }
 
@@ -158,9 +162,11 @@ impl Scanner {
     /// tens of seconds compiling the full rules.yar.
     #[cfg(test)]
     pub fn without_yara(rules: Vec<Rule>, throttle_ms: u64) -> Self {
-        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) = build_rule_indexes(&rules);
+        let arc_rules: Vec<Arc<Rule>> = rules.into_iter().map(Arc::new).collect();
+        let (compiled_regexes, sha256_index, md5_index, tlsh_rules) =
+            build_rule_indexes(&arc_rules);
         Self {
-            rules,
+            rules: arc_rules,
             compiled_regexes,
             sha256_index,
             md5_index,
@@ -267,13 +273,13 @@ impl Scanner {
             if let Some(rule) = self.sha256_index.get(&sha256.to_lowercase())
                 && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
             {
-                triggered_rules.push(rule.clone());
+                triggered_rules.push((**rule).clone());
             }
             // O(1) direct lookup for MD5
             if let Some(rule) = self.md5_index.get(&md5.to_lowercase())
                 && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
             {
-                triggered_rules.push(rule.clone());
+                triggered_rules.push((**rule).clone());
             }
             // TLSH similarity check against pre-parsed rule hashes
             if let Some(ref file_tlsh_str) = tlsh_opt {
@@ -285,7 +291,7 @@ impl Scanner {
                         if diff_score <= 50
                             && !triggered_rules.iter().any(|r: &Rule| r.id == rule.id)
                         {
-                            triggered_rules.push(rule.clone());
+                            triggered_rules.push((**rule).clone());
                         }
                     }
                 }
@@ -299,14 +305,13 @@ impl Scanner {
         {
             let mut bytes = Vec::new();
             if file.read_to_end(&mut bytes).is_ok() {
-                // A. Regex Check
-                let contents = String::from_utf8_lossy(&bytes).into_owned();
+                // A. Regex Check directly on &bytes (zero-copy, no 10MB heap String allocation)
                 for (rule_id, regex) in &self.compiled_regexes {
-                    if regex.is_match(&contents)
+                    if regex.is_match(&bytes)
                         && let Some(rule) = self.rules.iter().find(|r| r.id == *rule_id)
                         && !triggered_rules.iter().any(|r| r.id == rule.id)
                     {
-                        triggered_rules.push(rule.clone());
+                        triggered_rules.push((**rule).clone());
                     }
                 }
 

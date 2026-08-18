@@ -22,6 +22,10 @@ pub struct RuntimeConfig {
     /// "auto" (cgroup v2 freezer, SIGSTOP fallback), "cgroup", "sigstop", or
     /// "off" (legacy immediate-kill, no freezing).
     pub process_containment: Option<String>,
+    /// API key for AlienVault OTX (optional).
+    pub otx_api_key: Option<String>,
+    /// Auth-Key for ThreatFox API (optional).
+    pub threatfox_auth_key: Option<String>,
 }
 
 /// Locates and loads the runtime config, preferring in order:
@@ -81,6 +85,39 @@ pub fn effective_contain_strategy(runtime: &RuntimeConfig) -> ContainStrategy {
         .as_deref()
         .map(ContainStrategy::from_str)
         .unwrap_or(ContainStrategy::Auto)
+}
+
+/// Returns the effective OTX API key, preferring config.json then OTX_API_KEY env var.
+pub fn effective_otx_api_key(runtime: &RuntimeConfig) -> Option<String> {
+    runtime
+        .otx_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            std::env::var("OTX_API_KEY")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// Returns the effective ThreatFox Auth-Key, preferring config.json then THREATFOX_AUTH_KEY / THREATFOX_API_KEY env var.
+pub fn effective_threatfox_auth_key(runtime: &RuntimeConfig) -> Option<String> {
+    runtime
+        .threatfox_auth_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            std::env::var("THREATFOX_AUTH_KEY")
+                .ok()
+                .or_else(|| std::env::var("THREATFOX_API_KEY").ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -765,5 +802,46 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_effective_api_keys_resolution_and_fallback() {
+        let mut cfg = RuntimeConfig::default();
+        assert_eq!(effective_otx_api_key(&cfg), None);
+        assert_eq!(effective_threatfox_auth_key(&cfg), None);
+
+        cfg.otx_api_key = Some("test-otx-key".to_string());
+        cfg.threatfox_auth_key = Some("test-threatfox-key".to_string());
+        assert_eq!(effective_otx_api_key(&cfg).as_deref(), Some("test-otx-key"));
+        assert_eq!(
+            effective_threatfox_auth_key(&cfg).as_deref(),
+            Some("test-threatfox-key")
+        );
+
+        let empty_cfg = RuntimeConfig {
+            otx_api_key: Some("  ".to_string()),
+            threatfox_auth_key: Some("".to_string()),
+            ..Default::default()
+        };
+
+        // SAFETY: test-only env manipulation in single-threaded unit test.
+        unsafe {
+            std::env::set_var("OTX_API_KEY", "env-otx-key");
+            std::env::set_var("THREATFOX_AUTH_KEY", "env-tf-key");
+        }
+
+        assert_eq!(
+            effective_otx_api_key(&empty_cfg).as_deref(),
+            Some("env-otx-key")
+        );
+        assert_eq!(
+            effective_threatfox_auth_key(&empty_cfg).as_deref(),
+            Some("env-tf-key")
+        );
+
+        unsafe {
+            std::env::remove_var("OTX_API_KEY");
+            std::env::remove_var("THREATFOX_AUTH_KEY");
+        }
     }
 }
