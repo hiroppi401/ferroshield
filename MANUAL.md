@@ -78,13 +78,17 @@ Pengaturan runtime tidak ditandatangani dan dibaca dari `config.json` (atau `$FE
   "default_action": "quarantine",
   "downloads_dir": "/home/user/Downloads",
   "miner_detection_require_secondary_signal": true,
-  "process_containment": "auto"
+  "process_containment": "auto",
+  "otx_api_key": "your_otx_key",
+  "threatfox_auth_key": "your_threatfox_key"
 }
 ```
 
 | Kunci | Nilai | Keterangan |
 |---|---|---|
 | `process_containment` | `auto` (default), `cgroup`, `sigstop`, `off` | Strategi **freeze-first anti-mutasi**: proses berbahaya dibekukan dulu (cgroup v2 freezer, fallback `SIGSTOP`) sebelum binary dinetralkan & dibunuh, sehingga malware tak bisa bermutasi/membuat file baru saat dibunuh. `off` = perilaku lama (langsung `kill -9`). |
+| `otx_api_key` | `string` (opsional) | Kunci API AlienVault OTX untuk unduh indikator ancaman komunitas. |
+| `threatfox_auth_key` | `string` (opsional) | Auth-Key ThreatFox (abuse.ch) untuk unduh IOC malware terkini. |
 
 ---
 
@@ -182,3 +186,5 @@ Di Web UI, Anda dapat melakukan operasi berikut secara visual:
 1.  **Dashboard Overview**: Melihat status proteksi, jumlah aturan, total file karantina, dan **Real-time Audit Logs terminal** yang interaktif.
 2.  **File Scanner Tab**: Melakukan pemindaian direktori secara interaktif dengan opsi penghapusan permanen.
 3.  **Karantina Tab**: Mengelola berkas berbahaya yang terisolasi dengan tombol klik-cepat untuk **Pulihkan (Restore)** atau **Hapus Permanen**.
+4.  **Web Guard & Whitelist Tab**: Melihat daftar domain terblokir dan menambahkan domain/IP/path ke whitelist untuk mitigasi false positive.
+5.  **Pengaturan Tab**: Mengonfigurasi AlienVault OTX API key & ThreatFox Auth-Key, serta menjalankan sinkronisasi Threat Feed secara manual langsung dari dashboard.

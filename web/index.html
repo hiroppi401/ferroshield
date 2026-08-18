@@ -700,6 +700,10 @@
                 <svg class="menu-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
                 <span>Web Guard</span>
             </a>
+            <a class="menu-item" onclick="switchView('settings', this)">
+                <svg class="menu-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span>Pengaturan</span>
+            </a>
         </nav>
 
         <div class="system-status-indicator">
@@ -976,6 +980,73 @@
                 </table>
             </div>
         </section>
+
+        <!-- VIEW: Settings & API Configuration -->
+        <section id="view-settings" class="view-content">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <div>
+                    <h2 style="font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem;">Konfigurasi Sistem & API Keys</h2>
+                    <p style="color: var(--text-muted); font-size: 0.9rem;">Atur API token untuk threat intelligence (AlienVault OTX & ThreatFox) dan sinkronisasi basis aturan secara visual.</p>
+                </div>
+                <button class="btn btn-secondary" onclick="loadSettings()">Muat Ulang</button>
+            </div>
+
+            <!-- Card Threat Intelligence API Keys -->
+            <div class="card-stat" style="width: 100%; display: block; margin-bottom: 2rem;">
+                <h3 style="font-size: 1.05rem; margin-bottom: 0.75rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    <svg style="width: 18px; height: 18px; fill: none; stroke: var(--primary); stroke-width: 2;" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                    Threat Intelligence API Tokens
+                </h3>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1.5rem;">
+                    Kunci API ini digunakan oleh FerroShield untuk mengunduh indikator ancaman terbaru (IOC) dari AlienVault OTX dan ThreatFox saat pembaruan feed.
+                </p>
+
+                <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+                    <div>
+                        <label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-color);">
+                            AlienVault OTX API Key
+                        </label>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <input type="password" id="setting-otx-key" placeholder="Masukkan AlienVault OTX API Key..." style="flex: 1; padding: 0.65rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(0,0,0,0.3); color: var(--text-color); font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;">
+                            <button type="button" class="btn btn-secondary" style="padding: 0.65rem 1rem; font-size: 0.85rem;" onclick="togglePasswordVisibility('setting-otx-key')">Lihat</button>
+                        </div>
+                        <small style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.35rem; display: block;">Dapatkan gratis di https://otx.alienvault.com</small>
+                    </div>
+
+                    <div>
+                        <label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-color);">
+                            ThreatFox Auth-Key
+                        </label>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <input type="password" id="setting-threatfox-key" placeholder="Masukkan ThreatFox Auth-Key..." style="flex: 1; padding: 0.65rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(0,0,0,0.3); color: var(--text-color); font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;">
+                            <button type="button" class="btn btn-secondary" style="padding: 0.65rem 1rem; font-size: 0.85rem;" onclick="togglePasswordVisibility('setting-threatfox-key')">Lihat</button>
+                        </div>
+                        <small style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.35rem; display: block;">Dapatkan gratis di https://threatfox.abuse.ch</small>
+                    </div>
+
+                    <div style="margin-top: 0.5rem;">
+                        <button class="btn" style="padding: 0.75rem 1.5rem; font-size: 0.9rem;" onclick="saveSettings()">💾 Simpan Konfigurasi</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card Threat Feed Sync Action -->
+            <div class="card-stat" style="width: 100%; display: block;">
+                <h3 style="font-size: 1.05rem; margin-bottom: 0.75rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    <svg style="width: 18px; height: 18px; fill: none; stroke: var(--info); stroke-width: 2;" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                    Pembaruan Threat Intelligence Manual
+                </h3>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1.25rem;">
+                    Unduh dan gabungkan indikator ancaman terbaru dari Feodo Tracker, URLhaus, AlienVault OTX (jika terisi), dan ThreatFox (jika terisi) ke dalam rules.json secara langsung.
+                </p>
+                <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                    <button class="btn" id="feed-update-btn" style="padding: 0.75rem 1.5rem; font-size: 0.9rem; background: linear-gradient(135deg, var(--info), hsl(200, 95%, 40%));" onclick="triggerThreatFeedUpdate()">
+                        🔄 Perbarui Threat Feed Sekarang
+                    </button>
+                    <span id="feed-update-status" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+                </div>
+            </div>
+        </section>
     </main>
 
     <!-- Toast notification container -->
@@ -1099,7 +1170,8 @@
                 'scanner': 'Malware Scanner',
                 'quarantine': 'Quarantine Vault',
                 'network': 'Network Monitor',
-                'webguard': 'Web Guard & Threat Intelligence'
+                'webguard': 'Web Guard & Threat Intelligence',
+                'settings': 'Konfigurasi & Pengaturan'
             };
             document.getElementById('view-title').textContent = titles[viewName] || 'Dashboard';
 
@@ -1111,6 +1183,8 @@
             } else if (viewName === 'webguard') {
                 loadWebGuardDomains(true);
                 loadWhitelistData();
+            } else if (viewName === 'settings') {
+                loadSettings();
             }
         }
 
@@ -2111,6 +2185,105 @@
                     })
                     .catch(err => alert("Kesalahan koneksi: " + err.message));
             }
+        }
+
+        // --- Settings & Configuration Management ---
+        let cachedRuntimeConfig = {};
+
+        function togglePasswordVisibility(inputId) {
+            const input = document.getElementById(inputId);
+            if (input) {
+                input.type = input.type === 'password' ? 'text' : 'password';
+            }
+        }
+
+        function loadSettings() {
+            authFetch('/api/config')
+                .then(res => res.json())
+                .then(cfg => {
+                    cachedRuntimeConfig = cfg || {};
+                    const otxEl = document.getElementById('setting-otx-key');
+                    const tfEl = document.getElementById('setting-threatfox-key');
+                    if (otxEl) otxEl.value = cfg.otx_api_key || '';
+                    if (tfEl) tfEl.value = cfg.threatfox_auth_key || '';
+                })
+                .catch(err => {
+                    console.error("Error loading config:", err);
+                    showToast("Gagal memuat konfigurasi: " + err.message);
+                });
+        }
+
+        function saveSettings() {
+            const otxKey = (document.getElementById('setting-otx-key')?.value || '').trim();
+            const tfKey = (document.getElementById('setting-threatfox-key')?.value || '').trim();
+
+            const payload = {
+                ...cachedRuntimeConfig,
+                otx_api_key: otxKey.length > 0 ? otxKey : null,
+                threatfox_auth_key: tfKey.length > 0 ? tfKey : null
+            };
+
+            authFetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast("Gagal menyimpan: " + data.error);
+                } else {
+                    cachedRuntimeConfig = payload;
+                    showToast("Konfigurasi API key berhasil disimpan!");
+                    fetchLogs();
+                }
+            })
+            .catch(err => {
+                console.error("Error saving config:", err);
+                showToast("Error menyimpan konfigurasi: " + err.message);
+            });
+        }
+
+        function triggerThreatFeedUpdate() {
+            const btn = document.getElementById('feed-update-btn');
+            const status = document.getElementById('feed-update-status');
+            if (btn) btn.disabled = true;
+            if (status) {
+                status.textContent = "Sedang mengunduh dan memperbarui feed...";
+                status.style.color = "var(--info)";
+            }
+
+            authFetch('/api/feed/update', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (btn) btn.disabled = false;
+                    if (data.error) {
+                        if (status) {
+                            status.textContent = "Gagal: " + data.error;
+                            status.style.color = "var(--alert)";
+                        }
+                        showToast("Pembaruan feed gagal: " + data.error);
+                    } else {
+                        if (status) {
+                            status.textContent = "Selesai: " + (data.message || "Threat feed berhasil diperbarui");
+                            status.style.color = "var(--primary)";
+                        }
+                        showToast("Threat feed berhasil diperbarui!");
+                        fetchStatus();
+                        fetchLogs();
+                        if (typeof loadWebGuardDomains === 'function') {
+                            loadWebGuardDomains(true);
+                        }
+                    }
+                })
+                .catch(err => {
+                    if (btn) btn.disabled = false;
+                    if (status) {
+                        status.textContent = "Error: " + err.message;
+                        status.style.color = "var(--alert)";
+                    }
+                    showToast("Error pembaruan feed: " + err.message);
+                });
         }
 
         // Polling background updates

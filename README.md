@@ -162,11 +162,15 @@ Hal yang perlu diperhatikan:
 ### 1. Instalasi Otomatis (Semua Distribusi Linux)
 Script `install.sh` (POSIX `sh`) membangun biner, mengompilasi modul eBPF secara opsional, membuat keypair Ed25519, menandatangani `rules.json`, serta memasang layanan — bekerja di systemd, OpenRC, maupun sysvinit:
 ```bash
-sudo ./install.sh           # instal & jalankan
-sudo ./install.sh --uninstall   # hapus semua
+sudo ./install.sh                                               # instal & jalankan default
+sudo ./install.sh --api-token "otx_token_anda"                  # instal dengan AlienVault OTX API key
+sudo ./install.sh --otx-api-key "otx" --threatfox-auth-key "tf" # instal dengan spesifik API keys
+sudo ./install.sh --uninstall                                   # hapus semua
+./install.sh --help                                             # panduan parameter
 ```
 Installer otomatis menangani:
 - Deteksi init system (systemd/OpenRC/sysvinit).
+- Konfigurasi runtime (`config.json`) dengan API key yang aman (mode `0600`).
 - Keypair `rules.key`/`rules.pub` lewat perintah bawaan `ferroshield gen-keys` (tanpa `openssl`).
 - Modul eBPF **opsional** (dilewati bila `clang`/`libbpf` tidak tersedia → fallback procfs).
 - Ruleset YARA `rules.yar` otomatis dipasang ke `/etc/ferroshield/` bila tersedia.
@@ -273,7 +277,8 @@ Setelah daemon monitor atau web mode berjalan, buka peramban Anda dan akses **`h
 1. **Overview**: Metrik jumlah aturan, file dikarantina, status sistem, dan **Real-Time Audit Terminal Logs**.
 2. **Scanner**: Tab interaktif untuk memasukkan path folder, mengontrol jalannya scan (start, pause, resume, stop), memantau progress persentase, dan melihat hasil ancaman.
 3. **Quarantine Vault**: Daftar berkas terisolasi berenkripsi AES-256-GCM dengan fitur satu-klik untuk memulihkan (*restore*) ke lokasi asal atau menghapus secara permanen.
-4. **Whitelist & Settings**: Mengelola pengecualian path file (`whitelist.json`) dan memperbarui *threat feed* langsung dari antarmuka web.
+4. **Whitelist & Web Guard**: Mengelola pengecualian path file (`whitelist.json`), mitigasi False Positive, dan monitoring reputasi domain.
+5. **Pengaturan & API Keys**: Mengonfigurasi AlienVault OTX API key & ThreatFox Auth-Key secara visual serta menjalankan sinkronisasi Threat Feed langsung dari dashboard.
 
 ---
 

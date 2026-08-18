@@ -28,6 +28,51 @@ pub struct RuntimeConfig {
     pub threatfox_auth_key: Option<String>,
 }
 
+/// Resolves the file path to read/write runtime config, preferring:
+/// 1. $FERROSHIELD_CONFIG if set
+/// 2. config.json in current directory if it exists
+/// 3. /etc/ferroshield/config.json if /etc/ferroshield directory exists
+/// 4. config.json in current directory as default
+pub fn resolve_runtime_config_path() -> PathBuf {
+    if let Ok(env_path) = std::env::var("FERROSHIELD_CONFIG") {
+        return PathBuf::from(env_path);
+    }
+    let local = PathBuf::from("config.json");
+    if local.exists() {
+        return local;
+    }
+    let system = PathBuf::from("/etc/ferroshield/config.json");
+    if Path::new("/etc/ferroshield").exists() || system.exists() {
+        return system;
+    }
+    local
+}
+
+/// Saves the given runtime config into the resolved runtime config path
+/// with permission 0600 on Unix systems.
+pub fn save_runtime_config(cfg: &RuntimeConfig) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = resolve_runtime_config_path();
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json_str = serde_json::to_string_pretty(cfg)?;
+    std::fs::write(&path, json_str)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
+
+    Ok(path)
+}
+
 /// Locates and loads the runtime config, preferring in order:
 /// $FERROSHIELD_CONFIG, ./config.json, /etc/ferroshield/config.json,
 /// then legacy rules.json "settings" (development fallback).
@@ -843,5 +888,42 @@ mod tests {
             std::env::remove_var("OTX_API_KEY");
             std::env::remove_var("THREATFOX_AUTH_KEY");
         }
+    }
+
+    #[test]
+    fn test_save_runtime_config_persists_and_reloads() {
+        let dir = temp_dir("save_cfg");
+        let cfg_file = dir.join("custom_config.json");
+
+        unsafe {
+            std::env::set_var("FERROSHIELD_CONFIG", &cfg_file);
+        }
+
+        let cfg = RuntimeConfig {
+            default_action: Some("delete".to_string()),
+            downloads_dir: Some("/tmp/downloads".to_string()),
+            miner_detection_require_secondary_signal: Some(true),
+            process_containment: Some("auto".to_string()),
+            otx_api_key: Some("my-otx-key-123".to_string()),
+            threatfox_auth_key: Some("my-tf-key-456".to_string()),
+        };
+
+        let saved_path = save_runtime_config(&cfg).unwrap();
+        assert_eq!(saved_path, cfg_file);
+
+        let reloaded = load_runtime_config();
+        assert_eq!(reloaded.default_action.as_deref(), Some("delete"));
+        assert_eq!(reloaded.downloads_dir.as_deref(), Some("/tmp/downloads"));
+        assert_eq!(reloaded.otx_api_key.as_deref(), Some("my-otx-key-123"));
+        assert_eq!(
+            reloaded.threatfox_auth_key.as_deref(),
+            Some("my-tf-key-456")
+        );
+
+        unsafe {
+            std::env::remove_var("FERROSHIELD_CONFIG");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

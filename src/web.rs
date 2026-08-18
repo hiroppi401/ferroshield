@@ -591,6 +591,67 @@ fn handle_request(
                 .with_status_code(StatusCode(200))
                 .with_header(json_header))
         }
+        (&Method::Get, "/api/config") => {
+            let runtime_config = crate::config::load_runtime_config();
+            let body = serde_json::to_string(&runtime_config).map_err(|e| e.to_string())?;
+            Ok(Response::from_string(body)
+                .with_status_code(StatusCode(200))
+                .with_header(json_header))
+        }
+        (&Method::Post, "/api/config") => {
+            let mut content = String::new();
+            request
+                .as_reader()
+                .read_to_string(&mut content)
+                .map_err(|e| e.to_string())?;
+            let new_config: crate::config::RuntimeConfig =
+                serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+            match crate::config::save_runtime_config(&new_config) {
+                Ok(path) => {
+                    log_message(&format!(
+                        "[+] Web API: Konfigurasi berhasil disimpan ke {}",
+                        path.display()
+                    ));
+                    Ok(Response::from_string(
+                        "{\"success\": true, \"message\": \"Konfigurasi berhasil disimpan\"}",
+                    )
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header))
+                }
+                Err(e) => {
+                    log_message(&format!("[-] Web API: Gagal menyimpan konfigurasi: {}", e));
+                    Ok(Response::from_string(format!(
+                        "{{\"error\": \"Gagal menyimpan konfigurasi: {}\"}}",
+                        e
+                    ))
+                    .with_status_code(StatusCode(500))
+                    .with_header(json_header))
+                }
+            }
+        }
+        (&Method::Post, "/api/feed/update") => {
+            log_message("[*] Web API: Menerima permintaan pembaruan threat feed...");
+            match crate::feed::update_threat_feed() {
+                Ok(()) => {
+                    log_message("[+] Web API: Pembaruan threat feed selesai.");
+                    Ok(Response::from_string(
+                        "{\"success\": true, \"message\": \"Threat feed berhasil diperbarui\"}",
+                    )
+                    .with_status_code(StatusCode(200))
+                    .with_header(json_header))
+                }
+                Err(e) => {
+                    log_message(&format!("[-] Web API: Pembaruan threat feed gagal: {}", e));
+                    Ok(Response::from_string(format!(
+                        "{{\"error\": \"Gagal memperbarui threat feed: {}\"}}",
+                        e
+                    ))
+                    .with_status_code(StatusCode(500))
+                    .with_header(json_header))
+                }
+            }
+        }
         (&Method::Post, "/api/scan") => {
             let mut content = String::new();
             request
@@ -1888,5 +1949,46 @@ mod tests {
         );
         // Ensure execution time difference is not proportional to 500x dataset size increase
         let _ = elapsed_small;
+    }
+
+    #[test]
+    fn test_api_config_routes() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ferroshield_web_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let cfg_path = temp_dir.join("config.json");
+
+        unsafe {
+            std::env::set_var("FERROSHIELD_CONFIG", &cfg_path);
+        }
+
+        let cfg = crate::config::RuntimeConfig {
+            default_action: Some("quarantine".to_string()),
+            downloads_dir: None,
+            miner_detection_require_secondary_signal: Some(true),
+            process_containment: Some("auto".to_string()),
+            otx_api_key: Some("test-otx-token-99".to_string()),
+            threatfox_auth_key: Some("test-tf-token-88".to_string()),
+        };
+        crate::config::save_runtime_config(&cfg).unwrap();
+
+        let loaded = crate::config::load_runtime_config();
+        assert_eq!(loaded.otx_api_key.as_deref(), Some("test-otx-token-99"));
+        assert_eq!(
+            loaded.threatfox_auth_key.as_deref(),
+            Some("test-tf-token-88")
+        );
+
+        unsafe {
+            std::env::remove_var("FERROSHIELD_CONFIG");
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

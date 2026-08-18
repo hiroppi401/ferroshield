@@ -1,8 +1,11 @@
 #!/bin/sh
 # FerroShield - distro-agnostic installer / uninstaller
 # Usage:
-#   sudo ./install.sh            build, install, generate keys, start service
-#   sudo ./install.sh --uninstall   stop service and remove all FerroShield files
+#   sudo ./install.sh                                       build, install, generate keys, start service
+#   sudo ./install.sh --api-token <TOKEN>                   install with AlienVault OTX API key
+#   sudo ./install.sh --otx-api-key <K> --threatfox-auth-key <K> install with specific API keys
+#   sudo ./install.sh --uninstall                           stop service and remove all FerroShield files
+#   ./install.sh --help                                     show help message
 
 set -e
 
@@ -187,14 +190,53 @@ install_rules() {
     fi
 }
 
+escape_json() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 write_config() {
-    if [ -f "$CONF_DIR/config.json" ]; then
-        ok "config.json sudah ada, melewati pembuatan."
+    mkdir -p "$CONF_DIR"
+    local cfg_file="$CONF_DIR/config.json"
+    local otx_val="${OTX_API_KEY:-}"
+    local tf_val="${THREATFOX_AUTH_KEY:-}"
+    local otx_esc
+    local tf_esc
+    otx_esc=$(escape_json "$otx_val")
+    tf_esc=$(escape_json "$tf_val")
+
+    if [ -f "$cfg_file" ]; then
+        if [ -n "$otx_val" ] || [ -n "$tf_val" ]; then
+            msg "Memperbarui API token pada $cfg_file..."
+            cat > "$cfg_file" <<EOF
+{
+  "default_action": "quarantine",
+  "downloads_dir": null,
+  "miner_detection_require_secondary_signal": true,
+  "process_containment": "auto",
+  "otx_api_key": "$otx_esc",
+  "threatfox_auth_key": "$tf_esc"
+}
+EOF
+            chmod 0600 "$cfg_file"
+            ok "config.json diperbarui dengan API token baru."
+        else
+            ok "config.json sudah ada, melewati pembuatan."
+        fi
         return 0
     fi
-    printf '{\n  "default_action": "quarantine",\n  "downloads_dir": null,\n  "miner_detection_require_secondary_signal": true,\n  "process_containment": "auto"\n}\n' > "$CONF_DIR/config.json"
-    chmod 0600 "$CONF_DIR/config.json"
-    ok "config.json dibuat (default_action=quarantine, miner secondary signal aktif, process_containment=auto)."
+
+    cat > "$cfg_file" <<EOF
+{
+  "default_action": "quarantine",
+  "downloads_dir": null,
+  "miner_detection_require_secondary_signal": true,
+  "process_containment": "auto",
+  "otx_api_key": "$otx_esc",
+  "threatfox_auth_key": "$tf_esc"
+}
+EOF
+    chmod 0600 "$cfg_file"
+    ok "config.json dibuat (default_action=quarantine, process_containment=auto, token dikonfigurasi)."
 }
 
 # --- Service installation --------------------------------------------------
@@ -396,11 +438,104 @@ uninstall() {
     ok "FerroShield berhasil dihapus."
 }
 
+show_help() {
+    cat <<EOF
+FerroShield - Skrip Instalasi & Konfigurasi Distro-Agnostik
+
+Penggunaan:
+  sudo ./install.sh [OPSI...]
+
+Opsi:
+  install                       Instalasi FerroShield (default)
+  --api-token <TOKEN>           API token umum / AlienVault OTX API key
+  --otx-api-key <KEY>           API key untuk AlienVault OTX (otx.alienvault.com)
+  --threatfox-auth-key <KEY>    Auth-Key untuk ThreatFox API (threatfox.abuse.ch)
+  --uninstall, -u               Hapus seluruh instalasi dan layanan FerroShield
+  --help, -h                    Tampilkan panduan ini
+
+Variabel Lingkungan:
+  API_TOKEN                     API token umum
+  OTX_API_KEY                   AlienVault OTX API key
+  THREATFOX_AUTH_KEY            ThreatFox Auth-Key
+
+Contoh:
+  sudo ./install.sh --api-token "otx_secret_key_123"
+  sudo ./install.sh --otx-api-key "xyz" --threatfox-auth-key "abc"
+  sudo ./install.sh --uninstall
+EOF
+}
+
 # --- Main ------------------------------------------------------------------
-case "${1:-install}" in
+ACTION=install
+API_TOKEN="${API_TOKEN:-}"
+OTX_API_KEY="${OTX_API_KEY:-}"
+THREATFOX_AUTH_KEY="${THREATFOX_AUTH_KEY:-${THREATFOX_API_KEY:-}}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        install)
+            ACTION=install
+            ;;
+        --uninstall|-u|uninstall)
+            ACTION=uninstall
+            ;;
+        --help|-h|help)
+            ACTION=help
+            ;;
+        --api-token)
+            shift
+            [ $# -gt 0 ] || { err "Opsi --api-token membutuhkan nilai."; exit 1; }
+            API_TOKEN="$1"
+            ;;
+        --api-token=*)
+            API_TOKEN="${1#*=}"
+            ;;
+        --otx-api-key|--otx-key)
+            shift
+            [ $# -gt 0 ] || { err "Opsi $1 membutuhkan nilai."; exit 1; }
+            OTX_API_KEY="$1"
+            ;;
+        --otx-api-key=*|--otx-key=*)
+            OTX_API_KEY="${1#*=}"
+            ;;
+        --threatfox-auth-key|--threatfox-key)
+            shift
+            [ $# -gt 0 ] || { err "Opsi $1 membutuhkan nilai."; exit 1; }
+            THREATFOX_AUTH_KEY="$1"
+            ;;
+        --threatfox-auth-key=*|--threatfox-key=*)
+            THREATFOX_AUTH_KEY="${1#*=}"
+            ;;
+        *)
+            err "Argumen tidak dikenal: $1 (Gunakan $0 --help untuk melihat panduan)"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# If generic API_TOKEN is given but specific OTX key is empty, set OTX key
+if [ -n "$API_TOKEN" ] && [ -z "$OTX_API_KEY" ]; then
+    OTX_API_KEY="$API_TOKEN"
+fi
+
+case "$ACTION" in
+    help)
+        show_help
+        exit 0
+        ;;
+    uninstall)
+        uninstall
+        ;;
     install)
         check_root
         msg "Memulai instalasi FerroShield..."
+        if [ -n "$OTX_API_KEY" ]; then
+            ok "AlienVault OTX API key dikonfigurasi."
+        fi
+        if [ -n "$THREATFOX_AUTH_KEY" ]; then
+            ok "ThreatFox Auth-Key dikonfigurasi."
+        fi
         if [ -f "$BINARY" ] || [ -d "$LIB_DIR" ] || [ -d "$CONF_DIR" ]; then
             warn "Instalasi FerroShield yang sudah ada terdeteksi, membersihkan terlebih dahulu..."
             stop_service
@@ -442,12 +577,5 @@ case "${1:-install}" in
         if have xdg-open; then
             xdg-open "http://127.0.0.1:8686" >/dev/null 2>&1 || true
         fi
-        ;;
-    --uninstall|-u|uninstall)
-        uninstall
-        ;;
-    *)
-        echo "Penggunaan: $0 {install|--uninstall}"
-        exit 1
         ;;
 esac
